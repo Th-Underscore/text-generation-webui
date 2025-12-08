@@ -4,8 +4,6 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Union
 
 import torch
-from exllamav3 import Cache, Config, Model
-from exllamav3.cache import CacheLayer_fp16, CacheLayer_quant
 from torch.nn import CrossEntropyLoss
 from transformers import (
     GenerationConfig,
@@ -15,6 +13,8 @@ from transformers import (
 )
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
+from exllamav3 import Cache, Config, Model
+from exllamav3.cache import CacheLayer_fp16, CacheLayer_quant
 from modules import shared
 from modules.logging_colors import logger
 
@@ -27,11 +27,13 @@ except Exception:
 
 class Exllamav3HF(PreTrainedModel, GenerationMixin):
     def __init__(self, model_dir):
-        super().__init__(PretrainedConfig())
-        self.generation_config = GenerationConfig()
+        hf_config = PretrainedConfig.from_pretrained(model_dir)
+        super().__init__(hf_config)
 
-        config = Config.from_directory(model_dir)
-        self.ex_model = Model.from_config(config)
+        exl3_config = Config.from_directory(model_dir)
+
+        self.generation_config = GenerationConfig()
+        self.ex_model = Model.from_config(exl3_config)
 
         # Calculate the closest multiple of 256 at or above the chosen value
         max_tokens = shared.args.ctx_size
@@ -73,6 +75,11 @@ class Exllamav3HF(PreTrainedModel, GenerationMixin):
         if shared.args.gpu_split:
             split = [float(alloc) for alloc in shared.args.gpu_split.split(",")]
             load_params['use_per_device'] = split
+
+        # Tensor-parallelism
+        if shared.args.enable_tp:
+            load_params['tensor_p'] = True
+            load_params['tp_backend'] = shared.args.tp_backend
 
         self.ex_model.load(**load_params)
         self.past_seq = None
@@ -245,3 +252,20 @@ class Exllamav3HF(PreTrainedModel, GenerationMixin):
         pretrained_model_name_or_path = Path(f'{shared.args.model_dir}') / Path(pretrained_model_name_or_path)
 
         return Exllamav3HF(pretrained_model_name_or_path)
+
+    def unload(self):
+        """Properly unload the ExllamaV3 model and free GPU memory."""
+        if hasattr(self, 'ex_model') and self.ex_model is not None:
+            self.ex_model.unload()
+            self.ex_model = None
+
+        if hasattr(self, 'ex_cache') and self.ex_cache is not None:
+            self.ex_cache = None
+
+        # Clean up any additional ExllamaV3 resources
+        if hasattr(self, 'past_seq'):
+            self.past_seq = None
+        if hasattr(self, 'past_seq_negative'):
+            self.past_seq_negative = None
+        if hasattr(self, 'ex_cache_negative'):
+            self.ex_cache_negative = None

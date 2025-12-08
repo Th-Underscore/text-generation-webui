@@ -2,7 +2,7 @@ import json
 import time
 from typing import Dict, List, Optional
 
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, model_validator, validator
 
 
 class GenerationOptions(BaseModel):
@@ -43,6 +43,7 @@ class GenerationOptions(BaseModel):
     ban_eos_token: bool = False
     add_bos_token: bool = True
     enable_thinking: bool = True
+    reasoning_effort: str = "medium"
     skip_special_tokens: bool = True
     static_cache: bool = False
     truncation_length: int = 0
@@ -98,13 +99,14 @@ class ToolCall(BaseModel):
 
 class CompletionRequestParams(BaseModel):
     model: str | None = Field(default=None, description="Unused parameter. To change the model, use the /v1/internal/model/load endpoint.")
-    prompt: str | List[str]
+    prompt: str | List[str] | None = Field(default=None, description="Text prompt for completion. Can also use 'messages' format for multimodal.")
+    messages: List[dict] | None = Field(default=None, description="OpenAI messages format for multimodal support. Alternative to 'prompt'.")
     best_of: int | None = Field(default=1, description="Unused parameter.")
     echo: bool | None = False
     frequency_penalty: float | None = 0
     logit_bias: dict | None = None
     logprobs: int | None = None
-    max_tokens: int | None = 16
+    max_tokens: int | None = 512
     n: int | None = Field(default=1, description="Unused parameter.")
     presence_penalty: float | None = 0
     stop: str | List[str] | None = None
@@ -114,6 +116,12 @@ class CompletionRequestParams(BaseModel):
     top_p: float | None = 1
     user: str | None = Field(default=None, description="Unused parameter.")
 
+    @model_validator(mode='after')
+    def validate_prompt_or_messages(self):
+        if self.prompt is None and self.messages is None:
+            raise ValueError("Either 'prompt' or 'messages' must be provided")
+        return self
+
 
 class CompletionRequest(GenerationOptions, CompletionRequestParams):
     pass
@@ -122,7 +130,7 @@ class CompletionRequest(GenerationOptions, CompletionRequestParams):
 class CompletionResponse(BaseModel):
     id: str
     choices: List[dict]
-    created: int = int(time.time())
+    created: int = Field(default_factory=lambda: int(time.time()))
     model: str
     object: str = "text_completion"
     usage: dict
@@ -158,7 +166,7 @@ class ChatCompletionRequestParams(BaseModel):
     user_bio: str | None = Field(default=None, description="The user description/personality.")
     chat_template_str: str | None = Field(default=None, description="Jinja2 template for chat.")
 
-    chat_instruct_command: str | None = None
+    chat_instruct_command: str | None = "Continue the chat dialogue below. Write a single reply for the character \"<|character|>\".\n\n<|prompt|>"
 
     continue_: bool = Field(default=False, description="Makes the last bot message in the history be continued instead of starting a new message.")
 
@@ -170,7 +178,7 @@ class ChatCompletionRequest(GenerationOptions, ChatCompletionRequestParams):
 class ChatCompletionResponse(BaseModel):
     id: str
     choices: List[dict]
-    created: int = int(time.time())
+    created: int = Field(default_factory=lambda: int(time.time()))
     model: str
     object: str = "chat.completion"
     usage: dict
@@ -219,7 +227,7 @@ class LogitsRequestParams(BaseModel):
     use_samplers: bool = False
     top_logits: int | None = 50
     frequency_penalty: float | None = 0
-    max_tokens: int | None = 16
+    max_tokens: int | None = 512
     presence_penalty: float | None = 0
     temperature: float | None = 1
     top_p: float | None = 1
@@ -254,6 +262,42 @@ class LoraListResponse(BaseModel):
 
 class LoadLorasRequest(BaseModel):
     lora_names: List[str]
+
+
+class ImageGenerationRequest(BaseModel):
+    """Image-specific parameters for generation."""
+    prompt: str
+    negative_prompt: str = ""
+    size: str = Field(default="1024x1024", description="'WIDTHxHEIGHT'")
+    steps: int = Field(default=9, ge=1)
+    cfg_scale: float = Field(default=0.0, ge=0.0)
+    image_seed: int = Field(default=-1, description="-1 for random")
+    batch_size: int | None = Field(default=None, ge=1, description="Parallel batch size (VRAM heavy)")
+    n: int = Field(default=1, ge=1, description="Alias for batch_size (OpenAI compatibility)")
+    batch_count: int = Field(default=1, ge=1, description="Sequential batch count")
+
+    # OpenAI compatibility (unused)
+    model: str | None = None
+    response_format: str = "b64_json"
+    user: str | None = None
+
+    @model_validator(mode='after')
+    def resolve_batch_size(self):
+        if self.batch_size is None:
+            self.batch_size = self.n
+        return self
+
+    def get_width_height(self) -> tuple[int, int]:
+        try:
+            parts = self.size.lower().split('x')
+            return int(parts[0]), int(parts[1])
+        except (ValueError, IndexError):
+            return 1024, 1024
+
+
+class ImageGenerationResponse(BaseModel):
+    created: int = Field(default_factory=lambda: int(time.time()))
+    data: List[dict]
 
 
 def to_json(obj):

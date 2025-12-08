@@ -8,12 +8,19 @@ import sys
 import threading
 import time
 from pathlib import Path
+from typing import Any, List
 
 import llama_cpp_binaries
 import requests
 
 from modules import shared
+from modules.image_utils import (
+    convert_image_attachments_to_pil,
+    convert_openai_messages_to_images,
+    convert_pil_to_base64
+)
 from modules.logging_colors import logger
+from modules.utils import resolve_model_path
 
 llamacpp_valid_cache_types = {"fp16", "q8_0", "q4_0"}
 
@@ -30,6 +37,7 @@ class LlamaServer:
         self.session = requests.Session()
         self.vocabulary_size = None
         self.bos_token = "<s>"
+        self.last_prompt_token_count = 0
 
         # Start the server
         self._start_server()
@@ -123,18 +131,61 @@ class LlamaServer:
 
         return payload
 
+    def _process_images_for_generation(self, state: dict) -> List[Any]:
+        """
+        Process all possible image inputs and return PIL images
+        """
+        pil_images = []
+        # Source 1: Web UI (from chatbot_wrapper)
+        if 'image_attachments' in state and state['image_attachments']:
+            pil_images.extend(convert_image_attachments_to_pil(state['image_attachments']))
+        # Source 2: Chat Completions API (/v1/chat/completions)
+        elif 'history' in state and state.get('history', {}).get('messages'):
+            pil_images.extend(convert_openai_messages_to_images(state['history']['messages']))
+        # Source 3: Legacy Completions API (/v1/completions)
+        elif 'raw_images' in state and state['raw_images']:
+            pil_images.extend(state.get('raw_images', []))
+
+        return pil_images
+
+    def is_multimodal(self) -> bool:
+        """Check if this model supports multimodal input."""
+        return shared.args.mmproj not in [None, 'None']
+
     def generate_with_streaming(self, prompt, state):
         url = f"http://127.0.0.1:{self.port}/completion"
         payload = self.prepare_payload(state)
 
-        token_ids = self.encode(prompt, add_bos_token=state["add_bos_token"])
+        pil_images = []
+
+        if shared.is_multimodal:
+            pil_images = self._process_images_for_generation(state)
+
+        if pil_images:
+            # Multimodal case
+            IMAGE_TOKEN_COST_ESTIMATE = 600  # A safe, conservative estimate per image
+
+            base64_images = [convert_pil_to_base64(img) for img in pil_images]
+            payload["prompt"] = {
+                "prompt_string": prompt,
+                "multimodal_data": base64_images
+            }
+
+            # Calculate an estimated token count
+            text_tokens = self.encode(prompt, add_bos_token=state["add_bos_token"])
+            self.last_prompt_token_count = len(text_tokens) + (len(pil_images) * IMAGE_TOKEN_COST_ESTIMATE)
+        else:
+            # Text only case
+            token_ids = self.encode(prompt, add_bos_token=state["add_bos_token"])
+            self.last_prompt_token_count = len(token_ids)
+            payload["prompt"] = token_ids
+
         if state['auto_max_new_tokens']:
-            max_new_tokens = state['truncation_length'] - len(token_ids)
+            max_new_tokens = state['truncation_length'] - self.last_prompt_token_count
         else:
             max_new_tokens = state['max_new_tokens']
 
         payload.update({
-            "prompt": token_ids,
             "n_predict": max_new_tokens,
             "stream": True,
             "cache_prompt": True
@@ -149,7 +200,10 @@ class LlamaServer:
         # Make the generation request
         response = self.session.post(url, json=payload, stream=True)
         try:
-            response.raise_for_status()  # Raise an exception for HTTP errors
+            if response.status_code == 400 and response.json()["error"]["type"] == "exceed_context_size_error":
+                logger.error("The request exceeds the available context size, try increasing it")
+            else:
+                response.raise_for_status()  # Raise an exception for HTTP errors
 
             full_text = ""
 
@@ -263,16 +317,18 @@ class LlamaServer:
             "--ctx-size", str(shared.args.ctx_size),
             "--gpu-layers", str(shared.args.gpu_layers),
             "--batch-size", str(shared.args.batch_size),
+            "--ubatch-size", str(shared.args.ubatch_size),
             "--port", str(self.port),
             "--no-webui",
+            "--flash-attn", "on",
         ]
 
-        if shared.args.flash_attn:
-            cmd.append("--flash-attn")
         if shared.args.threads > 0:
             cmd += ["--threads", str(shared.args.threads)]
         if shared.args.threads_batch > 0:
             cmd += ["--threads-batch", str(shared.args.threads_batch)]
+        if shared.args.cpu_moe:
+            cmd.append("--cpu-moe")
         if shared.args.no_mmap:
             cmd.append("--no-mmap")
         if shared.args.mlock:
@@ -293,15 +349,20 @@ class LlamaServer:
             cmd += ["--rope-freq-scale", str(1.0 / shared.args.compress_pos_emb)]
         if shared.args.rope_freq_base > 0:
             cmd += ["--rope-freq-base", str(shared.args.rope_freq_base)]
-        if shared.args.model_draft not in [None, 'None']:
-            path = Path(shared.args.model_draft)
+        if shared.args.mmproj not in [None, 'None']:
+            path = Path(shared.args.mmproj)
             if not path.exists():
-                path = Path(f'{shared.args.model_dir}/{shared.args.model_draft}')
+                path = Path('user_data/mmproj') / shared.args.mmproj
+
+            if path.exists():
+                cmd += ["--mmproj", str(path)]
+        if shared.args.model_draft not in [None, 'None']:
+            path = resolve_model_path(shared.args.model_draft)
 
             if path.is_file():
                 model_file = path
             else:
-                model_file = sorted(Path(f'{shared.args.model_dir}/{shared.args.model_draft}').glob('*.gguf'))[0]
+                model_file = sorted(path.glob('*.gguf'))[0]
 
             cmd += ["--model-draft", model_file]
             if shared.args.draft_max > 0:
@@ -314,6 +375,7 @@ class LlamaServer:
                 cmd += ["--ctx-size-draft", str(shared.args.ctx_size_draft)]
         if shared.args.streaming_llm:
             cmd += ["--cache-reuse", "1"]
+            cmd += ["--swa-full"]
         if shared.args.extra_flags:
             # Clean up the input
             extra_flags = shared.args.extra_flags.strip()
@@ -353,8 +415,7 @@ class LlamaServer:
         self.process = subprocess.Popen(
             cmd,
             stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
+            bufsize=0,
             env=env
         )
 
@@ -408,15 +469,63 @@ class LlamaServer:
 
 
 def filter_stderr_with_progress(process_stderr):
-    progress_pattern = re.compile(r'slot update_slots: id.*progress = (\d+\.\d+)')
+    """
+    Reads stderr lines from a process, filters out noise, and displays progress updates
+    inline (overwriting the same line) until completion.
+    """
+    progress_re = re.compile(r'slot update_slots: id.*progress = (\d+\.\d+)')
+    last_was_progress = False
+
     try:
-        for line in iter(process_stderr.readline, ''):
-            progress_match = progress_pattern.search(line)
-            if progress_match:
-                sys.stderr.write(line)
-                sys.stderr.flush()
-            elif not line.startswith(('srv ', 'slot ')) and 'log_server_r: request: GET /health' not in line:
-                sys.stderr.write(line)
-                sys.stderr.flush()
+        # Read in binary mode and decode manually
+        buffer = b""
+        while True:
+            # Read chunks aggressively to prevent buffer overflow
+            chunk = process_stderr.read(4096)
+            if not chunk:
+                break
+
+            buffer += chunk
+
+            # Process complete lines
+            while b'\n' in buffer:
+                line_bytes, buffer = buffer.split(b'\n', 1)
+                try:
+                    line = line_bytes.decode('utf-8', errors='replace').strip('\r\n')
+                    if line:  # Process non-empty lines
+                        match = progress_re.search(line)
+
+                        if match:
+                            progress = float(match.group(1))
+
+                            # Extract just the part from "prompt processing" onwards
+                            prompt_processing_idx = line.find('prompt processing')
+                            if prompt_processing_idx != -1:
+                                display_line = line[prompt_processing_idx:]
+                            else:
+                                display_line = line  # fallback to full line
+
+                            # choose carriage return for in-progress or newline at completion
+                            end_char = '\r' if progress < 1.0 else '\n'
+                            print(display_line, end=end_char, file=sys.stderr, flush=True)
+                            last_was_progress = (progress < 1.0)
+
+                        # skip noise lines
+                        elif not (line.startswith(('srv ', 'slot ')) or 'log_server_r: request: GET /health' in line):
+                            # if we were in progress, finish that line first
+                            if last_was_progress:
+                                print(file=sys.stderr)
+
+                            print(line, file=sys.stderr, flush=True)
+                            last_was_progress = False
+
+                except Exception:
+                    continue
+
     except (ValueError, IOError):
         pass
+    finally:
+        try:
+            process_stderr.close()
+        except:
+            pass

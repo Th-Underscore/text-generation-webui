@@ -1,12 +1,26 @@
 import os
+import shutil
 import warnings
+from pathlib import Path
 
 from modules import shared
 from modules.block_requests import OpenMonkeyPatch, RequestBlocker
+from modules.image_models import load_image_model
 from modules.logging_colors import logger
+from modules.prompts import load_prompt
 
-os.environ['GRADIO_ANALYTICS_ENABLED'] = 'False'
-os.environ['BITSANDBYTES_NOWELCOME'] = '1'
+# Set up Gradio temp directory path
+gradio_temp_path = Path('user_data') / 'cache' / 'gradio'
+shutil.rmtree(gradio_temp_path, ignore_errors=True)
+gradio_temp_path.mkdir(parents=True, exist_ok=True)
+
+# Set environment variables
+os.environ.update({
+    'GRADIO_ANALYTICS_ENABLED': 'False',
+    'BITSANDBYTES_NOWELCOME': '1',
+    'GRADIO_TEMP_DIR': str(gradio_temp_path)
+})
+
 warnings.filterwarnings('ignore', category=UserWarning, message='TypedStorage is deprecated')
 warnings.filterwarnings('ignore', category=UserWarning, message='Using the update method is deprecated')
 warnings.filterwarnings('ignore', category=UserWarning, message='Field "model_name" has conflict')
@@ -21,13 +35,11 @@ import matplotlib
 
 matplotlib.use('Agg')  # This fixes LaTeX rendering on some systems
 
-import json
 import os
 import signal
 import sys
 import time
 from functools import partial
-from pathlib import Path
 from threading import Lock, Thread
 
 import yaml
@@ -39,12 +51,14 @@ from modules import (
     ui_chat,
     ui_default,
     ui_file_saving,
+    ui_image_generation,
     ui_model_menu,
     ui_notebook,
     ui_parameters,
     ui_session,
     utils
 )
+from modules.chat import generate_pfp_cache
 from modules.extensions import apply_extensions
 from modules.LoRA import add_lora_to_model
 from modules.models import load_model, unload_model_if_idle
@@ -59,7 +73,15 @@ from modules.utils import gradio
 
 
 def signal_handler(sig, frame):
-    logger.info("Received Ctrl+C. Shutting down Text generation web UI gracefully.")
+    logger.info("Received Ctrl+C. Shutting down Text Generation Web UI gracefully.")
+
+    # Explicitly stop LlamaServer to avoid __del__ cleanup issues during shutdown
+    if shared.model and shared.model.__class__.__name__ == 'LlamaServer':
+        try:
+            shared.model.stop()
+        except:
+            pass
+
     sys.exit(0)
 
 
@@ -68,7 +90,7 @@ signal.signal(signal.SIGINT, signal_handler)
 
 def create_interface():
 
-    title = 'Text generation web UI'
+    title = 'Text Generation Web UI'
 
     # Password authentication
     auth = []
@@ -79,23 +101,38 @@ def create_interface():
             auth.extend(x.strip() for line in file for x in line.split(',') if x.strip())
     auth = [tuple(cred.split(':')) for cred in auth]
 
+    # Allowed paths
+    allowed_paths = ["css", "js", "extensions", "user_data/cache"]
+    if not shared.args.multi_user:
+        allowed_paths.append("user_data/image_outputs")
+
     # Import the extensions and execute their setup() functions
     if shared.args.extensions is not None and len(shared.args.extensions) > 0:
         extensions_module.load_extensions()
 
     # Force some events to be triggered on page load
     shared.persistent_interface_state.update({
+        'mode': shared.settings['mode'],
         'loader': shared.args.loader or 'llama.cpp',
-        'mode': shared.settings['mode'] if shared.settings['mode'] == 'instruct' else gr.update(),
-        'character_menu': shared.args.character or shared.settings['character'],
-        'instruction_template_str': shared.settings['instruction_template_str'],
-        'prompt_menu-default': shared.settings['prompt-default'],
-        'prompt_menu-notebook': shared.settings['prompt-notebook'],
         'filter_by_loader': (shared.args.loader or 'All') if not shared.args.portable else 'llama.cpp'
     })
 
-    if Path("user_data/cache/pfp_character.png").exists():
-        Path("user_data/cache/pfp_character.png").unlink()
+    if shared.settings['prompt-notebook']:
+        prompt = load_prompt(shared.settings['prompt-notebook'])
+        shared.persistent_interface_state.update({
+            'textbox-default': prompt,
+            'textbox-notebook': prompt
+        })
+
+    # Clear existing cache files
+    for cache_file in ['pfp_character.png', 'pfp_character_thumb.png']:
+        cache_path = Path(f"user_data/cache/{cache_file}")
+        if cache_path.exists():
+            cache_path.unlink()
+
+    # Regenerate for default character
+    if shared.settings['mode'] != 'instruct':
+        generate_pfp_cache(shared.settings['character'])
 
     # css/js strings
     css = ui.css
@@ -121,14 +158,19 @@ def create_interface():
         # Temporary clipboard for saving files
         shared.gradio['temporary_text'] = gr.Textbox(visible=False)
 
-        # Text Generation tab
+        # Chat tab
         ui_chat.create_ui()
-        ui_default.create_ui()
-        ui_notebook.create_ui()
 
-        ui_parameters.create_ui(shared.settings['preset'])  # Parameters tab
+        # Notebook tab
+        with gr.Tab("Notebook", elem_id='notebook-parent-tab'):
+            ui_default.create_ui()
+            ui_notebook.create_ui()
+
+        ui_parameters.create_ui()  # Parameters tab
+        ui_chat.create_character_settings_ui()  # Character tab
         ui_model_menu.create_ui()  # Model tab
         if not shared.args.portable:
+            ui_image_generation.create_ui()  # Image generation tab
             training.create_ui()  # Training tab
         ui_session.create_ui()  # Session tab
 
@@ -136,11 +178,16 @@ def create_interface():
         ui_chat.create_event_handlers()
         ui_default.create_event_handlers()
         ui_notebook.create_event_handlers()
+        if not shared.args.portable:
+            ui_image_generation.create_event_handlers()
 
         # Other events
         ui_file_saving.create_event_handlers()
         ui_parameters.create_event_handlers()
         ui_model_menu.create_event_handlers()
+
+        # UI persistence events
+        ui.setup_auto_save()
 
         # Interface launch events
         shared.gradio['interface'].load(
@@ -148,11 +195,26 @@ def create_interface():
             gradio('show_controls'),
             None,
             js=f"""(x) => {{
-                if ({str(shared.settings['dark_theme']).lower()}) {{
-                    document.getElementsByTagName('body')[0].classList.add('dark');
-                }}
-                else {{
-                    document.getElementsByTagName('body')[0].classList.remove('dark');
+                // Check if this is first visit or if localStorage is out of sync
+                const savedTheme = localStorage.getItem('theme');
+                const serverTheme = {str(shared.settings['dark_theme']).lower()} ? 'dark' : 'light';
+
+                // If no saved theme or mismatch with server on first load, use server setting
+                if (!savedTheme || !sessionStorage.getItem('theme_synced')) {{
+                    localStorage.setItem('theme', serverTheme);
+                    sessionStorage.setItem('theme_synced', 'true');
+                    if (serverTheme === 'dark') {{
+                        document.getElementsByTagName('body')[0].classList.add('dark');
+                    }} else {{
+                        document.getElementsByTagName('body')[0].classList.remove('dark');
+                    }}
+                }} else {{
+                    // Use localStorage for subsequent reloads
+                    if (savedTheme === 'dark') {{
+                        document.getElementsByTagName('body')[0].classList.add('dark');
+                    }} else {{
+                        document.getElementsByTagName('body')[0].classList.remove('dark');
+                    }}
                 }}
                 {js}
                 {ui.show_controls_js}
@@ -180,13 +242,13 @@ def create_interface():
             ssl_keyfile=shared.args.ssl_keyfile,
             ssl_certfile=shared.args.ssl_certfile,
             root_path=shared.args.subpath,
-            allowed_paths=["css", "js", "extensions", "user_data/cache"]
+            allowed_paths=allowed_paths,
         )
 
 
 if __name__ == "__main__":
 
-    logger.info("Starting Text generation web UI")
+    logger.info("Starting Text Generation Web UI")
     do_cmd_flags_warnings()
 
     # Load custom settings
@@ -195,14 +257,17 @@ if __name__ == "__main__":
         settings_file = Path(shared.args.settings)
     elif Path('user_data/settings.yaml').exists():
         settings_file = Path('user_data/settings.yaml')
-    elif Path('user_data/settings.json').exists():
-        settings_file = Path('user_data/settings.json')
 
     if settings_file is not None:
         logger.info(f"Loading settings from \"{settings_file}\"")
-        file_contents = open(settings_file, 'r', encoding='utf-8').read()
-        new_settings = json.loads(file_contents) if settings_file.suffix == "json" else yaml.safe_load(file_contents)
-        shared.settings.update(new_settings)
+        with open(settings_file, 'r', encoding='utf-8') as f:
+            new_settings = yaml.safe_load(f.read())
+
+        if new_settings:
+            shared.settings.update(new_settings)
+
+    # Apply CLI overrides for image model settings (CLI flags take precedence over saved settings)
+    shared.apply_image_model_cli_overrides()
 
     # Fallback settings for models
     shared.model_config['.*'] = get_fallback_settings()
@@ -214,6 +279,22 @@ if __name__ == "__main__":
         shared.args.extensions = shared.args.extensions or []
         if extension not in shared.args.extensions:
             shared.args.extensions.append(extension)
+
+    # Load image model if specified via CLI
+    if shared.args.image_model:
+        logger.info(f"Loading image model: {shared.args.image_model}")
+        result = load_image_model(
+            shared.args.image_model,
+            dtype=shared.settings.get('image_dtype', 'bfloat16'),
+            attn_backend=shared.settings.get('image_attn_backend', 'sdpa'),
+            cpu_offload=shared.settings.get('image_cpu_offload', False),
+            compile_model=shared.settings.get('image_compile', False),
+            quant_method=shared.settings.get('image_quant', 'none')
+        )
+        if result is not None:
+            shared.image_model_name = shared.args.image_model
+        else:
+            logger.error(f"Failed to load image model: {shared.args.image_model}")
 
     available_models = utils.get_available_models()
 
@@ -239,21 +320,14 @@ if __name__ == "__main__":
 
     # If any model has been selected, load it
     if shared.model_name != 'None':
-        p = Path(shared.model_name)
-        if p.exists():
-            model_name = p.parts[-1]
-            shared.model_name = model_name
-        else:
-            model_name = shared.model_name
-
-        model_settings = get_model_metadata(model_name)
+        model_settings = get_model_metadata(shared.model_name)
         update_model_parameters(model_settings, initial=True)  # hijack the command-line arguments
 
         # Auto-adjust GPU layers if not provided by user and it's a llama.cpp model
         if 'gpu_layers' not in shared.provided_arguments and shared.args.loader == 'llama.cpp' and 'gpu_layers' in model_settings:
             vram_usage, adjusted_layers = update_gpu_layers_and_vram(
                 shared.args.loader,
-                model_name,
+                shared.model_name,
                 model_settings['gpu_layers'],
                 shared.args.ctx_size,
                 shared.args.cache_type,
@@ -264,7 +338,7 @@ if __name__ == "__main__":
             shared.args.gpu_layers = adjusted_layers
 
         # Load the model
-        shared.model, shared.tokenizer = load_model(model_name)
+        shared.model, shared.tokenizer = load_model(shared.model_name)
         if shared.args.lora:
             add_lora_to_model(shared.args.lora)
 
@@ -277,8 +351,8 @@ if __name__ == "__main__":
 
     if shared.args.nowebui:
         # Start the API in standalone mode
-        shared.args.extensions = [x for x in shared.args.extensions if x != 'gallery']
-        if shared.args.extensions is not None and len(shared.args.extensions) > 0:
+        shared.args.extensions = [x for x in (shared.args.extensions or []) if x != 'gallery']
+        if shared.args.extensions:
             extensions_module.load_extensions()
     else:
         # Launch the web UI

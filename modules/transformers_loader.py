@@ -123,7 +123,7 @@ def load_tokenizer(model_name, tokenizer_dir=None):
 
         tokenizer = AutoTokenizer.from_pretrained(
             path_to_model,
-            trust_remote_code=shared.args.trust_remote_code,
+            trust_remote_code=shared.original_args.trust_remote_code,
             use_fast=not shared.args.no_use_fast
         )
 
@@ -131,25 +131,22 @@ def load_tokenizer(model_name, tokenizer_dir=None):
 
 
 def load_model_HF(model_name):
+    torch._dynamo.config.disable = True
+
     path_to_model = Path(f'{shared.args.model_dir}/{model_name}')
     params = {
         'low_cpu_mem_usage': True,
+        'attn_implementation': shared.args.attn_implementation,
         'torch_dtype': torch.bfloat16 if shared.args.bf16 else torch.float16,
     }
 
-    if shared.args.trust_remote_code:
+    if shared.original_args.trust_remote_code:
         params['trust_remote_code'] = True
-
-    if shared.args.use_flash_attention_2:
-        params['use_flash_attention_2'] = True
 
     if shared.args.force_safetensors:
         params['force_safetensors'] = True
 
-    if shared.args.use_eager_attention:
-        params['attn_implementation'] = 'eager'
-
-    config = AutoConfig.from_pretrained(path_to_model, trust_remote_code=shared.args.trust_remote_code)
+    config = AutoConfig.from_pretrained(path_to_model, trust_remote_code=shared.original_args.trust_remote_code)
 
     if 'chatglm' in model_name.lower():
         LoaderClass = AutoModel
@@ -260,9 +257,6 @@ def load_model_HF(model_name):
         pprint.PrettyPrinter(indent=4, sort_dicts=False).pprint(params)
         print()
         model = LoaderClass.from_pretrained(path_to_model, **params)
-
-    if shared.args.torch_compile:
-        model = torch.compile(model)
 
     return model
 

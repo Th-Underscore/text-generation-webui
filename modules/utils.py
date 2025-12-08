@@ -3,7 +3,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-from modules import github, shared
+from modules import shared
 from modules.logging_colors import logger
 
 
@@ -53,7 +53,7 @@ def delete_file(fname):
 
 
 def current_time():
-    return f"{datetime.now().strftime('%Y-%m-%d-%H%M%S')}"
+    return f"{datetime.now().strftime('%Y-%m-%d_%Hh%Mm%Ss')}"
 
 
 def atoi(text):
@@ -74,7 +74,7 @@ def natural_keys(text):
 
 def check_model_loaded():
     if shared.model_name == 'None' or shared.model is None:
-        if len(get_available_models()) <= 1:
+        if len(get_available_models()) == 0:
             error_msg = "No model is loaded.\n\nTo get started:\n1) Place a GGUF file in your user_data/models folder\n2) Go to the Model tab and select it"
             logger.error(error_msg)
             return False, error_msg
@@ -84,6 +84,21 @@ def check_model_loaded():
             return False, error_msg
 
     return True, None
+
+
+def resolve_model_path(model_name_or_path, image_model=False):
+    """
+    Resolves a model path, checking for a direct path
+    before the default models directory.
+    """
+
+    path_candidate = Path(model_name_or_path)
+    if path_candidate.exists():
+        return path_candidate
+    elif image_model:
+        return Path(f'{shared.args.image_model_dir}/{model_name_or_path}')
+    else:
+        return Path(f'{shared.args.model_dir}/{model_name_or_path}')
 
 
 def get_available_models():
@@ -140,6 +155,24 @@ def get_available_models():
     return filtered_gguf_files + model_dirs
 
 
+def get_available_image_models():
+    model_dir = Path(shared.args.image_model_dir)
+    model_dir.mkdir(parents=True, exist_ok=True)
+
+    # Find valid model directories
+    model_dirs = []
+    for item in os.listdir(model_dir):
+        item_path = model_dir / item
+        if not item_path.is_dir():
+            continue
+
+        model_dirs.append(item)
+
+    model_dirs = sorted(model_dirs, key=natural_keys)
+
+    return model_dirs
+
+
 def get_available_ggufs():
     model_list = []
     model_dir = Path(shared.args.model_dir)
@@ -154,15 +187,30 @@ def get_available_ggufs():
     return sorted(model_list, key=natural_keys)
 
 
+def get_available_mmproj():
+    mmproj_dir = Path('user_data/mmproj')
+    if not mmproj_dir.exists():
+        return ['None']
+
+    mmproj_files = []
+    for item in mmproj_dir.iterdir():
+        if item.is_file() and item.suffix.lower() in ('.gguf', '.bin'):
+            mmproj_files.append(item.name)
+
+    return ['None'] + sorted(mmproj_files, key=natural_keys)
+
+
 def get_available_presets():
     return sorted(set((k.stem for k in Path('user_data/presets').glob('*.yaml'))), key=natural_keys)
 
 
 def get_available_prompts():
-    prompt_files = list(Path('user_data/prompts').glob('*.txt'))
+    notebook_dir = Path('user_data/logs/notebook')
+    notebook_dir.mkdir(parents=True, exist_ok=True)
+
+    prompt_files = list(notebook_dir.glob('*.txt'))
     sorted_files = sorted(prompt_files, key=lambda x: x.stat().st_mtime, reverse=True)
     prompts = [file.stem for file in sorted_files]
-    prompts.append('None')
     return prompts
 
 
@@ -181,9 +229,18 @@ def get_available_instruction_templates():
 
 
 def get_available_extensions():
-    extensions = sorted(set(map(lambda x: x.parts[1], Path('extensions').glob('*/script.py'))), key=natural_keys)
-    extensions = [v for v in extensions if v not in github.new_extensions]
-    return extensions
+    # User extensions (higher priority)
+    user_extensions = []
+    user_ext_path = Path('user_data/extensions')
+    if user_ext_path.exists():
+        user_exts = map(lambda x: x.parts[2], user_ext_path.glob('*/script.py'))
+        user_extensions = sorted(set(user_exts), key=natural_keys)
+
+    # System extensions (excluding those overridden by user extensions)
+    system_exts = map(lambda x: x.parts[1], Path('extensions').glob('*/script.py'))
+    system_extensions = sorted(set(system_exts) - set(user_extensions), key=natural_keys)
+
+    return user_extensions + system_extensions
 
 
 def get_available_loras():

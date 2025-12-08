@@ -39,15 +39,16 @@ def minify_css(css: str) -> str:
     return css
 
 
-with open(Path(__file__).resolve().parent / '../css/html_readable_style.css', 'r') as f:
+with open(Path(__file__).resolve().parent / '../css/html_readable_style.css', 'r', encoding='utf-8') as f:
     readable_css = f.read()
-with open(Path(__file__).resolve().parent / '../css/html_instruct_style.css', 'r') as f:
+with open(Path(__file__).resolve().parent / '../css/html_instruct_style.css', 'r', encoding='utf-8') as f:
     instruct_css = f.read()
 
 # Custom chat styles
 chat_styles = {}
 for k in get_available_chat_styles():
-    chat_styles[k] = open(Path(f'css/chat_style-{k}.css'), 'r').read()
+    with open(Path(f'css/chat_style-{k}.css'), 'r', encoding='utf-8') as f:
+        chat_styles[k] = f.read()
 
 # Handle styles that derive from other styles
 for k in chat_styles:
@@ -115,77 +116,148 @@ def extract_thinking_block(string):
     THINK_START_TAG = "&lt;think&gt;"
     THINK_END_TAG = "&lt;/think&gt;"
 
-    # Look for opening tag
-    start_pos = string.lstrip().find(THINK_START_TAG)
-    if start_pos == -1:
-        return None, string
-
-    # Adjust start position to account for any leading whitespace
+    # Look for think tag first
     start_pos = string.find(THINK_START_TAG)
+    end_pos = string.find(THINK_END_TAG)
 
-    # Find the content after the opening tag
-    content_start = start_pos + len(THINK_START_TAG)
-
-    # Look for closing tag
-    end_pos = string.find(THINK_END_TAG, content_start)
-
-    if end_pos != -1:
-        # Both tags found - extract content between them
-        thinking_content = string[content_start:end_pos]
-        remaining_content = string[end_pos + len(THINK_END_TAG):]
+    # If think tags found, use existing logic
+    if start_pos != -1 or end_pos != -1:
+        # handle missing start or end tags
+        if start_pos == -1:
+            thought_start = 0
+        else:
+            thought_start = start_pos + len(THINK_START_TAG)
+        if end_pos == -1:
+            thought_end = len(string)
+            content_start = len(string)
+        else:
+            thought_end = end_pos
+            content_start = end_pos + len(THINK_END_TAG)
+        thinking_content = string[thought_start:thought_end]
+        remaining_content = string[content_start:]
         return thinking_content, remaining_content
-    else:
-        # Only opening tag found - everything else is thinking content
-        thinking_content = string[content_start:]
-        return thinking_content, ""
+
+    # If think tags not found, try GPT-OSS alternative format
+    ALT_START = "&lt;|channel|&gt;analysis&lt;|message|&gt;"
+    ALT_END = "&lt;|end|&gt;"
+    ALT_CONTENT_START = "&lt;|start|&gt;assistant&lt;|channel|&gt;final&lt;|message|&gt;"
+
+    alt_start_pos = string.find(ALT_START)
+    alt_end_pos = string.find(ALT_END)
+    alt_content_pos = string.find(ALT_CONTENT_START)
+
+    if alt_start_pos != -1 or alt_end_pos != -1:
+        if alt_start_pos == -1:
+            thought_start = 0
+        else:
+            thought_start = alt_start_pos + len(ALT_START)
+
+        # If no explicit end tag but content start exists, use content start as end
+        if alt_end_pos == -1:
+            if alt_content_pos != -1:
+                thought_end = alt_content_pos
+                content_start = alt_content_pos + len(ALT_CONTENT_START)
+            else:
+                thought_end = len(string)
+                content_start = len(string)
+        else:
+            thought_end = alt_end_pos
+            content_start = alt_content_pos + len(ALT_CONTENT_START) if alt_content_pos != -1 else alt_end_pos + len(ALT_END)
+
+        thinking_content = string[thought_start:thought_end]
+        remaining_content = string[content_start:]
+        return thinking_content, remaining_content
+
+    # Try seed:think format
+    SEED_START = "&lt;seed:think&gt;"
+    SEED_END = "&lt;/seed:think&gt;"
+
+    seed_start_pos = string.find(SEED_START)
+    seed_end_pos = string.find(SEED_END)
+
+    if seed_start_pos != -1 or seed_end_pos != -1:
+        if seed_start_pos == -1:
+            thought_start = 0
+        else:
+            thought_start = seed_start_pos + len(SEED_START)
+
+        if seed_end_pos == -1:
+            thought_end = len(string)
+            content_start = len(string)
+        else:
+            thought_end = seed_end_pos
+            content_start = seed_end_pos + len(SEED_END)
+
+        thinking_content = string[thought_start:thought_end]
+        remaining_content = string[content_start:]
+        return thinking_content, remaining_content
+
+    # Return if no format is found
+    return None, string
 
 
-@functools.lru_cache(maxsize=None)
-def convert_to_markdown(string, message_id=None):
-    if not string:
+def build_thinking_block(thinking_content, message_id, has_remaining_content):
+    """Build HTML for a thinking block."""
+    if thinking_content is None:
+        return None
+
+    # Process the thinking content through markdown
+    thinking_html = process_markdown_content(thinking_content)
+
+    # Generate unique ID for the thinking block
+    block_id = f"thinking-{message_id}-0"
+
+    # Check if thinking is complete or still in progress
+    is_streaming = not has_remaining_content
+    title_text = "Thinking..." if is_streaming else "Thought"
+
+    return f'''
+    <details class="thinking-block" data-block-id="{block_id}" data-streaming="{str(is_streaming).lower()}">
+        <summary class="thinking-header">
+            {info_svg_small}
+            <span class="thinking-title">{title_text}</span>
+        </summary>
+        <div class="thinking-content pretty_scrollbar">{thinking_html}</div>
+    </details>
+    '''
+
+
+def build_main_content_block(content):
+    """Build HTML for the main content block."""
+    if not content:
         return ""
 
-    # Use a default message ID if none provided
-    if message_id is None:
-        message_id = "unknown"
-
-    # Extract thinking block if present
-    thinking_content, remaining_content = extract_thinking_block(string)
-
-    # Process the main content
-    html_output = process_markdown_content(remaining_content)
-
-    # If thinking content was found, process it using the same function
-    if thinking_content is not None:
-        thinking_html = process_markdown_content(thinking_content)
-
-        # Generate unique ID for the thinking block
-        block_id = f"thinking-{message_id}-0"
-
-        # Check if thinking is complete or still in progress
-        is_streaming = not remaining_content
-        title_text = "Thinking..." if is_streaming else "Thought"
-
-        thinking_block = f'''
-        <details class="thinking-block" data-block-id="{block_id}" data-streaming="{str(is_streaming).lower()}">
-            <summary class="thinking-header">
-                {info_svg_small}
-                <span class="thinking-title">{title_text}</span>
-            </summary>
-            <div class="thinking-content pretty_scrollbar">{thinking_html}</div>
-        </details>
-        '''
-
-        # Prepend the thinking block to the message HTML
-        html_output = thinking_block + html_output
-
-    return html_output
+    return process_markdown_content(content)
 
 
 def process_markdown_content(string):
-    """Process a string through the markdown conversion pipeline."""
+    """
+    Process a string through the markdown conversion pipeline.
+    Uses robust manual parsing to ensure correct LaTeX and Code Block rendering.
+    """
     if not string:
         return ""
+
+    # Define a unique placeholder for LaTeX asterisks
+    LATEX_ASTERISK_PLACEHOLDER = "LATEXASTERISKPLACEHOLDER"
+
+    def protect_asterisks_in_latex(match):
+        """A replacer function for re.sub to protect asterisks in multiple LaTeX formats."""
+        # Check which delimiter group was captured
+        if match.group(1) is not None:  # Content from $$...$$
+            content = match.group(1)
+            modified_content = content.replace('*', LATEX_ASTERISK_PLACEHOLDER)
+            return f'$${modified_content}$$'
+        elif match.group(2) is not None:  # Content from \[...\]
+            content = match.group(2)
+            modified_content = content.replace('*', LATEX_ASTERISK_PLACEHOLDER)
+            return f'\\[{modified_content}\\]'
+        elif match.group(3) is not None:  # Content from \(...\)
+            content = match.group(3)
+            modified_content = content.replace('*', LATEX_ASTERISK_PLACEHOLDER)
+            return f'\\({modified_content}\\)'
+
+        return match.group(0)  # Fallback
 
     # Make \[ \]  LaTeX equations inline
     pattern = r'^\s*\\\[\s*\n([\s\S]*?)\n\s*\\\]\s*$'
@@ -203,7 +275,7 @@ def process_markdown_content(string):
     pattern = re.compile(r'\\begin{blockquote}(.*?)\\end{blockquote}', re.DOTALL)
     string = pattern.sub(replace_blockquote, string)
 
-    # Code
+    # Code block standardization
     string = string.replace('\\begin{code}', '```')
     string = string.replace('\\end{code}', '```')
     string = string.replace('\\begin{align*}', '$$')
@@ -216,10 +288,15 @@ def process_markdown_content(string):
     string = string.replace('\\end{equation*}', '$$')
     string = re.sub(r"(.)```", r"\1\n```", string)
 
+    # Protect asterisks within all LaTeX blocks before markdown conversion
+    latex_pattern = re.compile(r'\$\$(.*?)\$\$|\\\[(.*?)\\\]|\\\((.*?)\\\)', re.DOTALL)
+    string = latex_pattern.sub(protect_asterisks_in_latex, string)
+
     result = ''
     is_code = False
     is_latex = False
 
+    # Manual line iteration for robust structure parsing
     for line in string.split('\n'):
         stripped_line = line.strip()
 
@@ -274,6 +351,12 @@ def process_markdown_content(string):
         # Convert to HTML using markdown
         html_output = markdown.markdown(result, extensions=['fenced_code', 'tables', SaneListExtension()])
 
+    # Restore the LaTeX asterisks after markdown conversion
+    html_output = html_output.replace(LATEX_ASTERISK_PLACEHOLDER, '*')
+
+    # Remove extra newlines before </code>
+    html_output = re.sub(r'\s*</code>', '</code>', html_output)
+
     # Unescape code blocks
     pattern = re.compile(r'<code[^>]*>(.*?)</code>', re.DOTALL)
     html_output = pattern.sub(lambda x: html.unescape(x.group()), html_output)
@@ -282,6 +365,39 @@ def process_markdown_content(string):
     html_output = html_output.replace('\\\\', '\\')
 
     return html_output
+
+
+@functools.lru_cache(maxsize=None)
+def convert_to_markdown(string, message_id=None):
+    """
+    Convert a string to markdown HTML with support for multiple block types.
+    Blocks are assembled in order: thinking, main content, etc.
+    """
+    if not string:
+        return ""
+
+    # Use a default message ID if none provided
+    if message_id is None:
+        message_id = "unknown"
+
+    # Extract different components from the string
+    thinking_content, remaining_content = extract_thinking_block(string)
+
+    # Build individual HTML blocks
+    blocks = []
+
+    # Add thinking block if present
+    thinking_html = build_thinking_block(thinking_content, message_id, bool(remaining_content))
+    if thinking_html:
+        blocks.append(thinking_html)
+
+    # Add main content block
+    main_html = build_main_content_block(remaining_content)
+    if main_html:
+        blocks.append(main_html)
+
+    # Assemble all blocks into final HTML
+    return ''.join(blocks)
 
 
 def convert_to_markdown_wrapped(string, message_id=None, use_cache=True):
@@ -350,12 +466,14 @@ remove_button = f'<button class="footer-button footer-remove-button" title="Remo
 info_button = f'<button class="footer-button footer-info-button" title="message">{info_svg}</button>'
 
 
-def format_message_timestamp(history, role, index):
+def format_message_timestamp(history, role, index, tooltip_include_timestamp=True):
     """Get a formatted timestamp HTML span for a message if available"""
     key = f"{role}_{index}"
     if 'metadata' in history and key in history['metadata'] and history['metadata'][key].get('timestamp'):
         timestamp = history['metadata'][key]['timestamp']
-        return f"<span class='timestamp'>{timestamp}</span>"
+        tooltip_text = get_message_tooltip(history, role, index, include_timestamp=tooltip_include_timestamp)
+        title_attr = f' title="{html.escape(tooltip_text)}"' if tooltip_text else ''
+        return f"<span class='timestamp'{title_attr}>{timestamp}</span>"
 
     return ""
 
@@ -372,20 +490,47 @@ def format_message_attachments(history, role, index):
         for attachment in attachments:
             name = html.escape(attachment["name"])
 
-            # Make clickable if URL exists
-            if "url" in attachment:
-                name = f'<a href="{html.escape(attachment["url"])}" target="_blank" rel="noopener noreferrer">{name}</a>'
+            if attachment.get("type") == "image":
+                image_data = attachment.get("image_data", "")
+                attachments_html += (
+                    f'<div class="attachment-box image-attachment">'
+                    f'<img src="{image_data}" alt="{name}" class="image-preview" />'
+                    f'<div class="attachment-name">{name}</div>'
+                    f'</div>'
+                )
+            else:
+                # Make clickable if URL exists (web search)
+                if "url" in attachment:
+                    name = f'<a href="{html.escape(attachment["url"])}" target="_blank" rel="noopener noreferrer">{name}</a>'
 
-            attachments_html += (
-                f'<div class="attachment-box">'
-                f'<div class="attachment-icon">{attachment_svg}</div>'
-                f'<div class="attachment-name">{name}</div>'
-                f'</div>'
-            )
+                attachments_html += (
+                    f'<div class="attachment-box">'
+                    f'<div class="attachment-icon">{attachment_svg}</div>'
+                    f'<div class="attachment-name">{name}</div>'
+                    f'</div>'
+                )
+
         attachments_html += '</div>'
         return attachments_html
 
     return ""
+
+
+def get_message_tooltip(history, role, index, include_timestamp=True):
+    """Get tooltip text combining timestamp and model name for a message"""
+    key = f"{role}_{index}"
+    if 'metadata' not in history or key not in history['metadata']:
+        return ""
+
+    meta = history['metadata'][key]
+    tooltip_parts = []
+
+    if include_timestamp and meta.get('timestamp'):
+        tooltip_parts.append(meta['timestamp'])
+    if meta.get('model_name'):
+        tooltip_parts.append(f"Model: {meta['model_name']}")
+
+    return " | ".join(tooltip_parts)
 
 
 def get_version_navigation_html(history, i, role):
@@ -443,179 +588,135 @@ def actions_html(history, i, role, info_message=""):
             f'{version_nav_html}')
 
 
-def generate_instruct_html(history):
-    output = f'<style>{instruct_css}</style><div class="chat" id="chat" data-mode="instruct"><div class="messages">'
+def generate_instruct_html(history, last_message_only=False):
+    if not last_message_only:
+        output = f'<style>{instruct_css}</style><div class="chat" id="chat" data-mode="instruct"><div class="messages">'
+    else:
+        output = ""
 
-    for i in range(len(history['visible'])):
-        row_visible = history['visible'][i]
-        row_internal = history['internal'][i]
-        converted_visible = [convert_to_markdown_wrapped(entry, message_id=i, use_cache=i != len(history['visible']) - 1) for entry in row_visible]
+    def create_message(role, content, raw_content):
+        """Inner function that captures variables from outer scope."""
+        class_name = "user-message" if role == "user" else "assistant-message"
 
-        # Get timestamps
-        user_timestamp = format_message_timestamp(history, "user", i)
-        assistant_timestamp = format_message_timestamp(history, "assistant", i)
+        # Get role-specific data
+        timestamp = format_message_timestamp(history, role, i)
+        attachments = format_message_attachments(history, role, i)
 
-        # Get attachments
-        user_attachments = format_message_attachments(history, "user", i)
-        assistant_attachments = format_message_attachments(history, "assistant", i)
+        # Create info button if timestamp exists
+        info_message = ""
+        if timestamp:
+            tooltip_text = get_message_tooltip(history, role, i)
+            info_message = info_button.replace('title="message"', f'title="{html.escape(tooltip_text)}"')
 
-        # Create info buttons for timestamps if they exist
-        info_message_user = ""
-        if user_timestamp != "":
-            # Extract the timestamp value from the span
-            user_timestamp_value = user_timestamp.split('>', 1)[1].split('<', 1)[0]
-            info_message_user = info_button.replace("message", user_timestamp_value)
-
-        info_message_assistant = ""
-        if assistant_timestamp != "":
-            # Extract the timestamp value from the span
-            assistant_timestamp_value = assistant_timestamp.split('>', 1)[1].split('<', 1)[0]
-            info_message_assistant = info_button.replace("message", assistant_timestamp_value)
-
-        if converted_visible[0]:  # Don't display empty user messages
-            output += (
-                f'<div class="user-message" '
-                f'data-raw="{html.escape(row_internal[0], quote=True)}"'
-                f'data-index={i}>'
-                f'<div class="text">'
-                f'<div class="message-body">{converted_visible[0]}</div>'
-                f'{user_attachments}'
-                f'{actions_html(history, i, "user", info_message_user)}'
-                f'</div>'
-                f'</div>'
-            )
-
-        output += (
-            f'<div class="assistant-message" '
-            f'data-raw="{html.escape(row_internal[1], quote=True)}"'
+        return (
+            f'<div class="{class_name}" '
+            f'data-raw="{html.escape(raw_content, quote=True)}"'
             f'data-index={i}>'
             f'<div class="text">'
-            f'<div class="message-body">{converted_visible[1]}</div>'
-            f'{assistant_attachments}'
-            f'{actions_html(history, i, "assistant", info_message_assistant)}'
+            f'<div class="message-body">{content}</div>'
+            f'{attachments}'
+            f'{actions_html(history, i, role, info_message)}'
             f'</div>'
             f'</div>'
         )
 
-    output += "</div></div>"
+    # Determine range
+    start_idx = len(history['visible']) - 1 if last_message_only else 0
+    end_idx = len(history['visible'])
+
+    for i in range(start_idx, end_idx):
+        row_visible = history['visible'][i]
+        row_internal = history['internal'][i]
+
+        # Convert content
+        if last_message_only:
+            converted_visible = [None, convert_to_markdown_wrapped(row_visible[1], message_id=i, use_cache=i != len(history['visible']) - 1)]
+        else:
+            converted_visible = [convert_to_markdown_wrapped(entry, message_id=i, use_cache=i != len(history['visible']) - 1) for entry in row_visible]
+
+        # Generate messages
+        if not last_message_only and converted_visible[0]:
+            output += create_message("user", converted_visible[0], row_internal[0])
+
+        output += create_message("assistant", converted_visible[1], row_internal[1])
+
+    if not last_message_only:
+        output += "</div></div>"
+
     return output
 
 
-def generate_cai_chat_html(history, name1, name2, style, character, reset_cache=False):
-    output = f'<style>{chat_styles[style]}</style><div class="chat" id="chat"><div class="messages">'
+def get_character_image_with_cache_buster():
+    """Get character image URL with cache busting based on file modification time"""
+    cache_path = Path("user_data/cache/pfp_character_thumb.png")
+    if cache_path.exists():
+        mtime = int(cache_path.stat().st_mtime)
+        return f'<img src="file/user_data/cache/pfp_character_thumb.png?{mtime}" class="pfp_character">'
 
-    # We use ?character and ?time.time() to force the browser to reset caches
-    img_bot = (
-        f'<img src="file/user_data/cache/pfp_character_thumb.png?{character}" class="pfp_character">'
-        if Path("user_data/cache/pfp_character_thumb.png").exists() else ''
-    )
+    return ''
 
-    img_me = (
-        f'<img src="file/user_data/cache/pfp_me.png?{time.time() if reset_cache else ""}">'
-        if Path("user_data/cache/pfp_me.png").exists() else ''
-    )
 
-    for i in range(len(history['visible'])):
-        row_visible = history['visible'][i]
-        row_internal = history['internal'][i]
-        converted_visible = [convert_to_markdown_wrapped(entry, message_id=i, use_cache=i != len(history['visible']) - 1) for entry in row_visible]
+def generate_cai_chat_html(history, name1, name2, style, character, reset_cache=False, last_message_only=False):
+    if not last_message_only:
+        output = f'<style>{chat_styles[style]}</style><div class="chat" id="chat"><div class="messages">'
+    else:
+        output = ""
 
-        # Get timestamps
-        user_timestamp = format_message_timestamp(history, "user", i)
-        assistant_timestamp = format_message_timestamp(history, "assistant", i)
+    img_bot = get_character_image_with_cache_buster()
 
-        # Get attachments
-        user_attachments = format_message_attachments(history, "user", i)
-        assistant_attachments = format_message_attachments(history, "assistant", i)
+    def create_message(role, content, raw_content):
+        """Inner function for CAI-style messages."""
+        circle_class = "circle-you" if role == "user" else "circle-bot"
+        name = name1 if role == "user" else name2
 
-        if converted_visible[0]:  # Don't display empty user messages
-            output += (
-                f'<div class="message" '
-                f'data-raw="{html.escape(row_internal[0], quote=True)}"'
-                f'data-index={i}>'
-                f'<div class="circle-you">{img_me}</div>'
-                f'<div class="text">'
-                f'<div class="username">{name1}{user_timestamp}</div>'
-                f'<div class="message-body">{converted_visible[0]}</div>'
-                f'{user_attachments}'
-                f'{actions_html(history, i, "user")}'
-                f'</div>'
-                f'</div>'
-            )
+        # Get role-specific data
+        timestamp = format_message_timestamp(history, role, i, tooltip_include_timestamp=False)
+        attachments = format_message_attachments(history, role, i)
 
-        output += (
+        # Get appropriate image
+        if role == "user":
+            img = (f'<img src="file/user_data/cache/pfp_me.png?{time.time() if reset_cache else ""}">'
+                   if Path("user_data/cache/pfp_me.png").exists() else '')
+        else:
+            img = img_bot
+
+        return (
             f'<div class="message" '
-            f'data-raw="{html.escape(row_internal[1], quote=True)}"'
+            f'data-raw="{html.escape(raw_content, quote=True)}"'
             f'data-index={i}>'
-            f'<div class="circle-bot">{img_bot}</div>'
+            f'<div class="{circle_class}">{img}</div>'
             f'<div class="text">'
-            f'<div class="username">{name2}{assistant_timestamp}</div>'
-            f'<div class="message-body">{converted_visible[1]}</div>'
-            f'{assistant_attachments}'
-            f'{actions_html(history, i, "assistant")}'
+            f'<div class="username">{name}{timestamp}</div>'
+            f'<div class="message-body">{content}</div>'
+            f'{attachments}'
+            f'{actions_html(history, i, role)}'
             f'</div>'
             f'</div>'
         )
 
-    output += "</div></div>"
-    return output
+    # Determine range
+    start_idx = len(history['visible']) - 1 if last_message_only else 0
+    end_idx = len(history['visible'])
 
-
-def generate_chat_html(history, name1, name2, reset_cache=False):
-    output = f'<style>{chat_styles["wpp"]}</style><div class="chat" id="chat"><div class="messages">'
-
-    for i in range(len(history['visible'])):
+    for i in range(start_idx, end_idx):
         row_visible = history['visible'][i]
         row_internal = history['internal'][i]
-        converted_visible = [convert_to_markdown_wrapped(entry, message_id=i, use_cache=i != len(history['visible']) - 1) for entry in row_visible]
 
-        # Get timestamps
-        user_timestamp = format_message_timestamp(history, "user", i)
-        assistant_timestamp = format_message_timestamp(history, "assistant", i)
+        # Convert content
+        if last_message_only:
+            converted_visible = [None, convert_to_markdown_wrapped(row_visible[1], message_id=i, use_cache=i != len(history['visible']) - 1)]
+        else:
+            converted_visible = [convert_to_markdown_wrapped(entry, message_id=i, use_cache=i != len(history['visible']) - 1) for entry in row_visible]
 
-        # Get attachments
-        user_attachments = format_message_attachments(history, "user", i)
-        assistant_attachments = format_message_attachments(history, "assistant", i)
+        # Generate messages
+        if not last_message_only and converted_visible[0]:
+            output += create_message("user", converted_visible[0], row_internal[0])
 
-        # Create info buttons for timestamps if they exist
-        info_message_user = ""
-        if user_timestamp != "":
-            # Extract the timestamp value from the span
-            user_timestamp_value = user_timestamp.split('>', 1)[1].split('<', 1)[0]
-            info_message_user = info_button.replace("message", user_timestamp_value)
+        output += create_message("assistant", converted_visible[1], row_internal[1])
 
-        info_message_assistant = ""
-        if assistant_timestamp != "":
-            # Extract the timestamp value from the span
-            assistant_timestamp_value = assistant_timestamp.split('>', 1)[1].split('<', 1)[0]
-            info_message_assistant = info_button.replace("message", assistant_timestamp_value)
+    if not last_message_only:
+        output += "</div></div>"
 
-        if converted_visible[0]:  # Don't display empty user messages
-            output += (
-                f'<div class="message" '
-                f'data-raw="{html.escape(row_internal[0], quote=True)}"'
-                f'data-index={i}>'
-                f'<div class="text-you">'
-                f'<div class="message-body">{converted_visible[0]}</div>'
-                f'{user_attachments}'
-                f'{actions_html(history, i, "user", info_message_user)}'
-                f'</div>'
-                f'</div>'
-            )
-
-        output += (
-            f'<div class="message" '
-            f'data-raw="{html.escape(row_internal[1], quote=True)}"'
-            f'data-index={i}>'
-            f'<div class="text-bot">'
-            f'<div class="message-body">{converted_visible[1]}</div>'
-            f'{assistant_attachments}'
-            f'{actions_html(history, i, "assistant", info_message_assistant)}'
-            f'</div>'
-            f'</div>'
-        )
-
-    output += "</div></div>"
     return output
 
 
@@ -629,15 +730,13 @@ def time_greeting():
         return "Good evening!"
 
 
-def chat_html_wrapper(history, name1, name2, mode, style, character, reset_cache=False):
+def chat_html_wrapper(history, name1, name2, mode, style, character, reset_cache=False, last_message_only=False):
     if len(history['visible']) == 0:
         greeting = f"<div class=\"welcome-greeting\">{time_greeting()} How can I help you today?</div>"
         result = f'<div class="chat" id="chat">{greeting}</div>'
     elif mode == 'instruct':
-        result = generate_instruct_html(history)
-    elif style == 'wpp':
-        result = generate_chat_html(history, name1, name2)
+        result = generate_instruct_html(history, last_message_only=last_message_only)
     else:
-        result = generate_cai_chat_html(history, name1, name2, style, character, reset_cache)
+        result = generate_cai_chat_html(history, name1, name2, style, character, reset_cache=reset_cache, last_message_only=last_message_only)
 
-    return {'html': result}
+    return {'html': result, 'last_message_only': last_message_only}

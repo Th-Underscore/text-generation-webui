@@ -1,6 +1,6 @@
 ## OpenAI compatible API
 
-The main API for this project is meant to be a drop-in replacement to the OpenAI API, including Chat and Completions endpoints. 
+The main API for this project is meant to be a drop-in replacement to the OpenAI API, including Chat and Completions endpoints.
 
 * It is 100% offline and private.
 * It doesn't create any logs.
@@ -30,10 +30,10 @@ curl http://127.0.0.1:5000/v1/completions \
   -H "Content-Type: application/json" \
   -d '{
     "prompt": "This is a cake recipe:\n\n1.",
-    "max_tokens": 200,
-    "temperature": 1,
-    "top_p": 0.9,
-    "seed": 10
+    "max_tokens": 512,
+    "temperature": 0.6,
+    "top_p": 0.95,
+    "top_k": 20
   }'
 ```
 
@@ -51,7 +51,9 @@ curl http://127.0.0.1:5000/v1/chat/completions \
         "content": "Hello!"
       }
     ],
-    "mode": "instruct"
+    "temperature": 0.6,
+    "top_p": 0.95,
+    "top_k": 20
   }'
 ```
 
@@ -67,9 +69,103 @@ curl http://127.0.0.1:5000/v1/chat/completions \
         "content": "Hello! Who are you?"
       }
     ],
-    "mode": "chat",
-    "character": "Example"
+    "mode": "chat-instruct",
+    "character": "Example",
+    "temperature": 0.6,
+    "top_p": 0.95,
+    "top_k": 20
   }'
+```
+
+#### Multimodal/vision (llama.cpp and ExLlamaV3)
+
+##### With /v1/chat/completions (recommended!)
+
+```shell
+curl http://127.0.0.1:5000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {"type": "text", "text": "Please describe what you see in this image."},
+          {"type": "image_url", "image_url": {"url": "https://github.com/turboderp-org/exllamav3/blob/master/examples/media/cat.png?raw=true"}}
+        ]
+      }
+    ],
+    "temperature": 0.6,
+    "top_p": 0.95,
+    "top_k": 20
+  }'
+```
+
+For base64-encoded images, just replace the inner "url" value with this format: `data:image/FORMAT;base64,BASE64_STRING` where FORMAT is the file type (png, jpeg, gif, etc.) and BASE64_STRING is your base64-encoded image data.
+
+##### With /v1/completions
+
+```shell
+curl http://127.0.0.1:5000/v1/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "About image <__media__> and image <__media__>, what I can say is that the first one"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "https://github.com/turboderp-org/exllamav3/blob/master/examples/media/cat.png?raw=true"
+            }
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "https://github.com/turboderp-org/exllamav3/blob/master/examples/media/strawberry.png?raw=true"
+            }
+          }
+        ]
+      }
+    ],
+    "temperature": 0.6,
+    "top_p": 0.95,
+    "top_k": 20
+  }'
+```
+
+For base64-encoded images, just replace the inner "url" values with this format: `data:image/FORMAT;base64,BASE64_STRING` where FORMAT is the file type (png, jpeg, gif, etc.) and BASE64_STRING is your base64-encoded image data.
+
+#### Image generation
+
+```shell
+curl http://127.0.0.1:5000/v1/images/generations \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "an orange tree",
+    "steps": 9,
+    "cfg_scale": 0,
+    "batch_size": 1,
+    "batch_count": 1
+  }'
+```
+
+You need to load an image model first. You can do this via the UI, or by adding `--image-model your_model_name` when launching the server.
+
+The output is a JSON object containing a `data` array. Each element has a `b64_json` field with the base64-encoded PNG image:
+
+```json
+{
+  "created": 1764791227,
+  "data": [
+    {
+      "b64_json": "iVBORw0KGgo..."
+    }
+  ]
+}
 ```
 
 #### SSE streaming
@@ -84,7 +180,9 @@ curl http://127.0.0.1:5000/v1/chat/completions \
         "content": "Hello!"
       }
     ],
-    "mode": "instruct",
+    "temperature": 0.6,
+    "top_p": 0.95,
+    "top_k": 20,
     "stream": true
   }'
 ```
@@ -125,10 +223,11 @@ curl -k http://127.0.0.1:5000/v1/internal/model/list \
 curl -k http://127.0.0.1:5000/v1/internal/model/load \
   -H "Content-Type: application/json" \
   -d '{
-    "model_name": "model_name",
+    "model_name": "Qwen_Qwen3-0.6B-Q4_K_M.gguf",
     "args": {
-      "load_in_4bit": true,
-      "n_gpu_layers": 12
+      "ctx_size": 32768,
+      "flash_attn": true,
+      "cache_type": "q8_0"
     }
   }'
 ```
@@ -150,9 +249,10 @@ while True:
     user_message = input("> ")
     history.append({"role": "user", "content": user_message})
     data = {
-        "mode": "chat",
-        "character": "Example",
-        "messages": history
+        "messages": history,
+        "temperature": 0.6,
+        "top_p": 0.95,
+        "top_k": 20
     }
 
     response = requests.post(url, headers=headers, json=data, verify=False)
@@ -182,9 +282,11 @@ while True:
     user_message = input("> ")
     history.append({"role": "user", "content": user_message})
     data = {
-        "mode": "instruct",
         "stream": True,
-        "messages": history
+        "messages": history,
+        "temperature": 0.6,
+        "top_p": 0.95,
+        "top_k": 20
     }
 
     stream_response = requests.post(url, headers=headers, json=data, verify=False, stream=True)
@@ -218,10 +320,10 @@ headers = {
 
 data = {
     "prompt": "This is a cake recipe:\n\n1.",
-    "max_tokens": 200,
-    "temperature": 1,
-    "top_p": 0.9,
-    "seed": 10,
+    "max_tokens": 512,
+    "temperature": 0.6,
+    "top_p": 0.95,
+    "top_k": 20,
     "stream": True,
 }
 
@@ -346,7 +448,6 @@ The following environment variables can be used (they take precedence over every
 | `OPENEDAI_CERT_PATH`      | SSL certificate file path         |            cert.pem                |
 | `OPENEDAI_KEY_PATH`       | SSL key file path                    |             key.pem               |
 | `OPENEDAI_DEBUG`          | Enable debugging (set to 1)    | 1                          |
-| `SD_WEBUI_URL`           | WebUI URL (used by endpoint) | http://127.0.0.1:7861 |
 | `OPENEDAI_EMBEDDING_MODEL` | Embedding model (if applicable) |          sentence-transformers/all-mpnet-base-v2                  |
 | `OPENEDAI_EMBEDDING_DEVICE` | Embedding device (if applicable) |           cuda                 |
 
@@ -357,7 +458,6 @@ You can also set the following variables in your `settings.yaml` file:
 ```
 openai-embedding_device: cuda
 openai-embedding_model: "sentence-transformers/all-mpnet-base-v2"
-openai-sd_webui_url: http://127.0.0.1:7861
 openai-debug: 1
 ```
 
