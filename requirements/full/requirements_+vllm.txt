@@ -1,0 +1,4 @@
+compressed-tensors
+transformers==5.5
+
+nvidia-nccl-cu12==2.29.7

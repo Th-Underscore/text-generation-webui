@@ -73,6 +73,13 @@ loaders_and_params = OrderedDict({
     'TensorRT-LLM': [
         'ctx_size',
         'tensorrt_llm_info',
+    ],
+    'vLLM': [
+        'tensor_parallel_size',
+        'gpu_memory_utilization',
+        'max_num_seqs',
+        'ctx_size',
+        'gpu_devices',
     ]
 })
 
@@ -258,6 +265,21 @@ loaders_samplers = {
         'add_bos_token',
         'skip_special_tokens',
         'seed',
+    },
+    'vLLM': {
+        'temperature',
+        'top_p',
+        'top_k',
+        'min_p',
+        'repetition_penalty',
+        'frequency_penalty',
+        'presence_penalty',
+        'no_repeat_ngram_size',
+        'auto_max_new_tokens',
+        'ban_eos_token',
+        'add_bos_token',
+        'skip_special_tokens',
+        'seed',
     }
 }
 
@@ -351,6 +373,10 @@ def list_model_elements():
         'spec_ngram_size_m',
         'spec_ngram_min_hits',
         'mmproj',
+        'tensor_parallel_size',
+        'gpu_memory_utilization',
+        'max_num_seqs',
+        'gpu_devices',
     ]
 
     from modules import shared

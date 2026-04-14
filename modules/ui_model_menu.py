@@ -64,6 +64,28 @@ def create_ui():
                                 '* You can load either a pre-built TensorRT engine or a regular HF model. '
                                 'HF models will be compiled to a TensorRT engine automatically on each load (this can take a while).'
                             )
+                            shared.gradio['vllm_info'] = gr.Markdown(
+                                '* vLLM has to be installed manually: `pip install vllm`.\n\n'
+                                '* For multi-GPU tensor parallelism, set tensor_parallel_size to the number of GPUs.\n'
+                                '* Adjust gpu_memory_utilization to leave VRAM for TGW extensions (e.g. 0.85).'
+                            )
+
+                            shared.gradio['tensor_parallel_size'] = gr.Slider(
+                                label="tensor_parallel_size", minimum=1, step=1, maximum=8, value=getattr(shared.args, 'tensor_parallel_size', 1),
+                                info='Number of GPUs for tensor parallelism.'
+                            )
+                            shared.gradio['gpu_memory_utilization'] = gr.Slider(
+                                label="gpu_memory_utilization", minimum=0.1, maximum=1.0, step=0.05, value=getattr(shared.args, 'gpu_memory_utilization', 0.85),
+                                info='Fraction of GPU memory to use for the model KV cache.'
+                            )
+                            shared.gradio['max_num_seqs'] = gr.Slider(
+                                label="max_num_seqs", minimum=1, maximum=256, step=1, value=getattr(shared.args, 'max_num_seqs', 64),
+                                info='Maximum number of sequences.'
+                            )
+                            shared.gradio['gpu_devices'] = gr.Textbox(
+                                label="gpu_devices", value=getattr(shared.args, 'gpu_devices', '0,1'),
+                                info='Comma-separated GPU IDs (e.g., 0,1 or CUDA0,CUDA1). Used for multi-GPU tensor parallelism.'
+                            )
 
                             # Multimodal
                             with gr.Accordion("Multimodal (vision)", open=False) as shared.gradio['mmproj_accordion']:

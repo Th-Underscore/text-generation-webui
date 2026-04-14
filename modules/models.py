@@ -31,6 +31,7 @@ def load_model(model_name, loader=None):
         'ExLlamav3_HF': ExLlamav3_HF_loader,
         'ExLlamav3': ExLlamav3_loader,
         'TensorRT-LLM': TensorRT_LLM_loader,
+        'vLLM': vllm_loader,
     }
 
     metadata = get_model_metadata(model_name)
@@ -131,6 +132,13 @@ def TensorRT_LLM_loader(model_name):
     return model, model.tokenizer
 
 
+def vllm_loader(model_name):
+    from modules.vllm_loader import vLLMModel
+
+    model, tokenizer = vLLMModel.from_pretrained(model_name)
+    return model, tokenizer
+
+
 def unload_model(keep_model_name=False):
     if shared.model is None:
         return
@@ -138,7 +146,7 @@ def unload_model(keep_model_name=False):
     model_class_name = shared.model.__class__.__name__
     is_llamacpp = (model_class_name == 'LlamaServer')
 
-    if model_class_name in ['Exllamav3Model', 'Exllamav3HF', 'TensorRTLLMModel']:
+    if model_class_name in ['Exllamav3Model', 'Exllamav3HF', 'TensorRTLLMModel', 'vLLMModel']:
         shared.model.unload()
     elif model_class_name == 'LlamaServer':
         shared.model.stop()
