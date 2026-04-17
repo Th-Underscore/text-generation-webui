@@ -73,6 +73,17 @@ loaders_and_params = OrderedDict({
     'TensorRT-LLM': [
         'ctx_size',
         'tensorrt_llm_info',
+    ],
+    'Aphrodite': [
+        'ctx_size',
+        'tensor_parallel_size',
+        'gpu_memory_utilization',
+        'max_num_seqs',
+        'gpu_devices',
+        'attention_backend',
+        'enforce_eager',
+        'extra_flags',
+        'aphrodite_info',
     ]
 })
 
@@ -258,6 +269,21 @@ loaders_samplers = {
         'add_bos_token',
         'skip_special_tokens',
         'seed',
+    },
+    'Aphrodite': {
+        'temperature',
+        'top_p',
+        'top_k',
+        'min_p',
+        'repetition_penalty',
+        'frequency_penalty',
+        'presence_penalty',
+        'no_repeat_ngram_size',
+        'auto_max_new_tokens',
+        'ban_eos_token',
+        'add_bos_token',
+        'skip_special_tokens',
+        'seed',
     }
 }
 
@@ -351,6 +377,12 @@ def list_model_elements():
         'spec_ngram_size_m',
         'spec_ngram_min_hits',
         'mmproj',
+        'tensor_parallel_size',
+        'gpu_memory_utilization',
+        'max_num_seqs',
+        'gpu_devices',
+        'attention_backend', 
+        'enforce_eager',
     ]
 
     from modules import shared
