@@ -105,10 +105,11 @@ class Exllamav3HF(PreTrainedModel, GenerationMixin):
         """
         input_ids_tensor = input_ids if isinstance(input_ids, torch.Tensor) else torch.tensor(input_ids, dtype=torch.long)
         input_ids_tensor = input_ids_tensor.view(1, -1).cpu()
+        attn_mode = "sdpa_nc" if shared.args.no_flash_attn else "flash_attn_nc"
         with torch.inference_mode():
             output = self.ex_model.forward(
                 input_ids=input_ids_tensor,
-                params={"attn_mode": "flash_attn_nc"}
+                params={"attn_mode": attn_mode}
             ).cpu().float()
             # Mask padding slots beyond the real vocab so they can't appear in top-k
             output[..., self.ex_model.config.vocab_size:] = float("-inf")
@@ -125,6 +126,9 @@ class Exllamav3HF(PreTrainedModel, GenerationMixin):
         use_cache = kwargs.get('use_cache', True)
         labels = kwargs.get('labels', None)
         past_key_values = kwargs.get('past_key_values', None)
+        no_flash_attn = shared.args.no_flash_attn
+        attn_mode_cache = "sdpa_nc" if no_flash_attn else "flash_attn"
+        attn_mode_nc = "sdpa_nc" if no_flash_attn else "flash_attn_nc"
 
         if len(args) > 0:
             if not shared.args.cfg_cache:
@@ -153,7 +157,7 @@ class Exllamav3HF(PreTrainedModel, GenerationMixin):
 
         # Make the forward call
         if labels is None:
-            if past_seq is not None:
+            if past_seq is not None and not no_flash_attn:
                 min_length = min(past_seq.shape[0], seq_tensor.shape[0])
                 indices = torch.nonzero(~torch.eq(past_seq[:min_length], seq_tensor[:min_length]))
                 if len(indices) > 0:
@@ -176,7 +180,7 @@ class Exllamav3HF(PreTrainedModel, GenerationMixin):
                             self.ex_model.prefill(
                                 input_ids=chunk.view(1, -1),
                                 params={
-                                    "attn_mode": "flash_attn",
+                                    "attn_mode": attn_mode_cache,
                                     "cache": ex_cache,
                                     "past_len": longest_prefix + i,
                                     "batch_shape": (1, self.max_tokens),
@@ -194,34 +198,46 @@ class Exllamav3HF(PreTrainedModel, GenerationMixin):
                     current_len = 0
                     for i in range(0, tokens_to_process.shape[0], max_chunk_size):
                         chunk = tokens_to_process[i:i + max_chunk_size]
-                        self.ex_model.prefill(
-                            input_ids=chunk.view(1, -1),
-                            params={
-                                "attn_mode": "flash_attn",
-                                "cache": ex_cache,
-                                "past_len": current_len,
-                                "batch_shape": (1, self.max_tokens),
-                            }
-                        )
+                        if no_flash_attn:
+                            logits_chunk = self.ex_model.forward(
+                                input_ids=chunk.view(1, -1),
+                                params={"attn_mode": attn_mode_nc}
+                            )
+                        else:
+                            self.ex_model.prefill(
+                                input_ids=chunk.view(1, -1),
+                                params={
+                                    "attn_mode": attn_mode_cache,
+                                    "cache": ex_cache,
+                                    "past_len": current_len,
+                                    "batch_shape": (1, self.max_tokens),
+                                }
+                            )
                         current_len += chunk.shape[0]
                 else:
                     current_len = 0
 
             # Process the last token and get logits
-            logits = self.ex_model.forward(
-                input_ids=seq_tensor[-1:].view(1, -1),
-                params={
-                    "attn_mode": "flash_attn",
-                    "cache": ex_cache,
-                    "past_len": current_len,
-                    "batch_shape": (1, self.max_tokens),
-                }
-            ).to(input_ids.device).float()
+            if no_flash_attn:
+                logits = self.ex_model.forward(
+                    input_ids=seq_tensor[-1:].view(1, -1),
+                    params={"attn_mode": attn_mode_nc}
+                ).to(input_ids.device).float()
+            else:
+                logits = self.ex_model.forward(
+                    input_ids=seq_tensor[-1:].view(1, -1),
+                    params={
+                        "attn_mode": attn_mode_cache,
+                        "cache": ex_cache,
+                        "past_len": current_len,
+                        "batch_shape": (1, self.max_tokens),
+                    }
+                ).to(input_ids.device).float()
         else:
             # Labels path: single pass without cache for correct logits
             logits = self.ex_model.forward(
                 input_ids=seq_tensor.view(1, -1),
-                params={"attn_mode": "flash_attn_nc"}
+                params={"attn_mode": attn_mode_nc}
             ).float().cpu()
 
         if is_negative:

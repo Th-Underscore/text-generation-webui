@@ -117,6 +117,7 @@ def create_ui():
                                 shared.gradio['bf16'] = gr.Checkbox(label="bf16", value=shared.args.bf16)
                                 shared.gradio['cfg_cache'] = gr.Checkbox(label="cfg-cache", value=shared.args.cfg_cache, info='Necessary to use CFG with this loader.')
                                 shared.gradio['no_use_fast'] = gr.Checkbox(label="no_use_fast", value=shared.args.no_use_fast, info='Set use_fast=False while loading the tokenizer.')
+                                shared.gradio['no_flash_attn'] = gr.Checkbox(label="no_flash_attn", value=shared.args.no_flash_attn, info='Disable flash attention. Uses PyTorch SDPA instead (no caching, slower).')
                                 if not shared.args.portable:
                                     with gr.Row():
                                         shared.gradio['lora_menu'] = gr.Dropdown(multiselect=True, choices=utils.get_available_loras(), value=shared.lora_names, label='LoRA(s)', elem_classes='slim-dropdown', interactive=not mu)

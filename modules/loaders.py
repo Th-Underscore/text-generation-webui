@@ -59,6 +59,7 @@ loaders_and_params = OrderedDict({
         'no_use_fast',
         'enable_tp',
         'tp_backend',
+        'no_flash_attn',
     ],
     'ExLlamav3': [
         'ctx_size',
@@ -69,6 +70,7 @@ loaders_and_params = OrderedDict({
         'speculative_decoding_accordion',
         'enable_tp',
         'tp_backend',
+        'no_flash_attn',
     ],
     'TensorRT-LLM': [
         'ctx_size',
@@ -341,6 +343,7 @@ def list_model_elements():
         'tp_backend',
         'cfg_cache',
         'no_use_fast',
+        'no_flash_attn',
         'model_draft',
         'draft_max',
         'gpu_layers_draft',

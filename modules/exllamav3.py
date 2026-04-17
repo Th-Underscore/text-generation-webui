@@ -535,10 +535,11 @@ class Exllamav3Model:
         import torch
         input_ids_tensor = input_ids if isinstance(input_ids, torch.Tensor) else torch.tensor(input_ids, dtype=torch.long)
         input_ids_tensor = input_ids_tensor.view(1, -1).cpu()
+        attn_mode = "sdpa_nc" if shared.args.no_flash_attn else "flash_attn_nc"
         with torch.inference_mode():
             output = self.model.forward(
                 input_ids=input_ids_tensor,
-                params={"attn_mode": "flash_attn_nc"}
+                params={"attn_mode": attn_mode}
             ).cpu().float()
             # Mask padding slots beyond the real vocab so they can't appear in top-k
             output[..., self.model.config.vocab_size:] = float("-inf")
@@ -549,9 +550,10 @@ class Exllamav3Model:
         Process a batch of token_ids and return the logits for the last token.
         Uses flash_attn_nc (no cache) for correct results with recurrent models.
         """
+        attn_mode = "sdpa_nc" if shared.args.no_flash_attn else "flash_attn_nc"
         logits = self.model.forward(
             input_ids=token_ids,
-            params={"attn_mode": "flash_attn_nc"}
+            params={"attn_mode": attn_mode}
         )
 
         return logits[:, -1:, :].float().cpu()
