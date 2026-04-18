@@ -105,51 +105,10 @@ class LMDeployModel:
         cache_max_entry_count = getattr(shared.args, 'cache_max_entry_count', None) or 0.05
 
         quant_policy = 0
-        if cache_type in ('q8', 'int8'):
+        if cache_type == 'q8':
             quant_policy = 8
-        elif cache_type in ('q4', 'int4'):
+        elif cache_type == 'q4':
             quant_policy = 4
-
-        model_format = None
-        config_path = path_to_model / 'config.json'
-        if config_path.exists():
-            try:
-                import json
-                with open(config_path) as f:
-                    config = json.load(f)
-                quant_method = (
-                    config.get('quantization_config', {}).get('quant_method', '') or
-                    config.get('quant_method', '')
-                ).lower()
-                if 'awq' in quant_method:
-                    model_format = 'awq'
-                elif 'gptq' in quant_method:
-                    model_format = 'gptq'
-                elif 'compressed' in quant_method:
-                    model_format = 'compressed-tensors'
-                elif 'hqq' in quant_method:
-                    model_format = 'hqq'
-                elif quant_method:
-                    model_format = 'hf'
-            except Exception:
-                pass
-
-        if model_format is None:
-            name_lower = path_to_model.name.lower()
-            if 'awq' in name_lower:
-                model_format = 'awq'
-            elif 'gptq' in name_lower or 'gq' in name_lower:
-                model_format = 'gptq'
-            elif 'hqq' in name_lower:
-                model_format = 'hqq'
-
-        is_turbomind_format = (
-            (path_to_model / 'config.yaml').exists() or
-            (path_to_model / 'config.ini').exists()
-        )
-        if is_turbomind_format:
-            # Pre-converted; lmdeploy detects the format internally.
-            model_format = None
 
         if backend == 'turbomind':
             engine_config = TurbomindEngineConfig(
@@ -157,7 +116,6 @@ class LMDeployModel:
                 session_len=ctx_size,
                 max_batch_size=max_batch_size,
                 quant_policy=quant_policy,
-                model_format=model_format,
                 cache_max_entry_count=cache_max_entry_count,
                 max_prefill_token_num=256,
                 enable_prefix_caching=False,
@@ -218,7 +176,7 @@ class LMDeployModel:
         session = None
         try:
             session = self.pipeline.session()
-            for chunk in self.pipeline.stream_infer([prompt], sessions=session, gen_config=gen_config):
+            for chunk in self.pipeline.stream_infer(prompt, sessions=session, gen_config=gen_config):
                 if shared.stop_everything or (stop_event and stop_event.is_set()):
                     session.abort()
                     break
@@ -279,6 +237,7 @@ class LMDeployModel:
         self._last_prompt_token_count = value
 
     def unload(self):
+        logger.info("Unloading LMDeploy model...")
         if hasattr(self, 'pipeline'):
             del self.pipeline
             self.pipeline = None
