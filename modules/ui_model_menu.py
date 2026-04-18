@@ -2,6 +2,7 @@ import importlib
 import math
 import queue
 import threading
+import time
 import traceback
 from functools import partial
 from pathlib import Path
@@ -45,7 +46,7 @@ def create_ui():
                             shared.gradio['ctx_size'] = gr.Slider(label='ctx-size', minimum=0, maximum=1048576, step=1024, value=shared.args.ctx_size, info='Context length. 0 = auto for llama.cpp (requires gpu-layers=-1), 8192 for other loaders. Common values: 4096, 8192, 16384, 32768, 65536, 131072.')
                             shared.gradio['gpu_split'] = gr.Textbox(label='gpu-split', info='Comma-separated list of VRAM (in GB) to use per GPU. Example: 20,7,7')
                             shared.gradio['attn_implementation'] = gr.Dropdown(label="attn-implementation", choices=['sdpa', 'eager', 'flash_attention_2'], value=shared.args.attn_implementation, info='Attention implementation.')
-                            shared.gradio['cache_type'] = gr.Dropdown(label="cache-type", choices=['fp16', 'q8_0', 'q4_0', 'fp8', 'q8', 'q7', 'q6', 'q5', 'q4', 'q3', 'q2'], value=shared.args.cache_type, allow_custom_value=True, info='Valid options: llama.cpp - fp16, q8_0, q4_0; ExLlamaV3 - fp16, q2 to q8. For ExLlamaV3, you can type custom combinations for separate k/v bits (e.g. q4_q8).')
+                            shared.gradio['cache_type'] = gr.Dropdown(label="cache-type", choices=['fp16', 'q8_0', 'q4_0', 'fp8', 'q8', 'q7', 'q6', 'q5', 'q4', 'q3', 'q2'], value=shared.args.cache_type, allow_custom_value=True, info='Valid options: llama.cpp - fp16, q8_0, q4_0; ExLlamaV3 - fp16, q2 to q8; LMDeploy - fp16, q8, q4. For ExLlamaV3, you can type custom combinations for separate k/v bits (e.g. q4_q8).')
                             shared.gradio['fit_target'] = gr.Textbox(label='fit-target', value=shared.args.fit_target, info='Target VRAM margin per device for auto GPU layers (MiB). Comma-separated list for multiple devices.')
                             shared.gradio['tp_backend'] = gr.Dropdown(label="tp-backend", choices=['native', 'nccl'], value=shared.args.tp_backend, info='The backend for tensor parallelism.')
 
@@ -117,6 +118,10 @@ def create_ui():
                                 shared.gradio['bf16'] = gr.Checkbox(label="bf16", value=shared.args.bf16)
                                 shared.gradio['cfg_cache'] = gr.Checkbox(label="cfg-cache", value=shared.args.cfg_cache, info='Necessary to use CFG with this loader.')
                                 shared.gradio['no_use_fast'] = gr.Checkbox(label="no_use_fast", value=shared.args.no_use_fast, info='Set use_fast=False while loading the tokenizer.')
+                                shared.gradio['backend'] = gr.Dropdown(label="backend", choices=['turbomind', 'pytorch'], value=shared.args.backend, info='Inference backend: turbomind or pytorch.')
+                                shared.gradio['max_batch_size'] = gr.Slider(label="max-batch-size", minimum=1, maximum=256, step=1, value=shared.args.max_batch_size, info='Maximum batch size.')
+                                shared.gradio['tensor_parallel'] = gr.Slider(label="tensor-parallel", minimum=1, maximum=8, step=1, value=shared.args.tensor_parallel, info='Tensor parallelism degree.')
+                                shared.gradio['cache_max_entry_count'] = gr.Slider(label="cache-max-entry-count", minimum=0.01, maximum=0.9, step=0.01, value=shared.args.cache_max_entry_count, info='Fraction of free GPU memory to allocate for KV cache. 0.05 is a reasonable single-user default for LMDeploy.')
                                 if not shared.args.portable:
                                     with gr.Row():
                                         shared.gradio['lora_menu'] = gr.Dropdown(multiselect=True, choices=utils.get_available_loras(), value=shared.lora_names, label='LoRA(s)', elem_classes='slim-dropdown', interactive=not mu)
@@ -130,6 +135,17 @@ def create_ui():
                     with gr.Row():
                         shared.gradio['download_model_button'] = gr.Button("Download", variant='primary', interactive=not mu)
                         shared.gradio['get_file_list'] = gr.Button("Get file list", interactive=not mu)
+
+                with gr.Tab("Convert to TurboMind (LMDeploy)"):
+                    gr.Markdown("Convert a HuggingFace model to TurboMind format for faster loading with LMDeploy.")
+                    with gr.Row():
+                        shared.gradio['lmdeploy_convert_model'] = gr.Dropdown(label="Source model", choices=utils.get_available_models(), elem_classes='slim-dropdown', interactive=not mu)
+                        ui.create_refresh_button(shared.gradio['lmdeploy_convert_model'], lambda: None, lambda: {'choices': utils.get_available_models()}, 'refresh-button', interactive=not mu)
+                    shared.gradio['lmdeploy_convert_tp'] = gr.Slider(label="Tensor Parallel", minimum=1, maximum=8, step=1, value=1, info="Number of GPUs for tensor parallelism")
+                    with gr.Row():
+                        shared.gradio['lmdeploy_convert_button'] = gr.Button("Convert", variant='primary', interactive=not mu)
+                    shared.gradio['lmdeploy_convert_status'] = gr.Markdown("")
+                    gr.Markdown("The converted model will be saved as a subfolder in the models directory. To use it, select it as the model and use the LMDeploy loader.")
 
                 with gr.Tab("Customize instruction template"):
                     with gr.Row():
@@ -196,6 +212,7 @@ def create_event_handlers():
 
     shared.gradio['download_model_button'].click(download_model_wrapper, gradio('custom_model_menu', 'download_specific_file'), gradio('model_status'), show_progress=True)
     shared.gradio['get_file_list'].click(partial(download_model_wrapper, return_links=True), gradio('custom_model_menu', 'download_specific_file'), gradio('model_status'), show_progress=True)
+    shared.gradio['lmdeploy_convert_button'].click(lmdeploy_convert_model, gradio('lmdeploy_convert_model', 'lmdeploy_convert_tp'), gradio('lmdeploy_convert_status'), show_progress=True)
     shared.gradio['customized_template_submit'].click(save_instruction_template, gradio('model_menu', 'customized_template'), gradio('model_status'), show_progress=True)
 
 
@@ -233,6 +250,85 @@ def load_lora_wrapper(selected_loras):
     yield ("Applying the following LoRAs to {}:\n\n{}".format(shared.model_name, '\n'.join(selected_loras)))
     add_lora_to_model(selected_loras)
     yield ("Successfully applied the LoRAs")
+
+
+def lmdeploy_convert_model(model_name, tp, progress=gr.Progress()):
+    if not model_name or model_name == 'None':
+        yield "Please select a model to convert."
+        return
+
+    try:
+        from modules.lmdeploy import convert_model_to_turbomind
+        from modules.utils import resolve_model_path
+
+        source_path = resolve_model_path(model_name)
+        output_name = f"{model_name}-turbomind-tp{tp}"
+        output_path = Path(shared.args.model_dir) / output_name
+
+        if output_path.exists():
+            yield f"Converted model already exists at {output_path}. You can select it from the model menu."
+            return
+
+        model_format = None
+        config_path = source_path / 'config.json'
+        if config_path.exists():
+            import json
+            with open(config_path) as f:
+                config = json.load(f)
+            quant_method = ''
+            if 'quantization_config' in config:
+                quant_method = config['quantization_config'].get('quant_method', '').lower()
+            elif 'quant_method' in config:
+                quant_method = config.get('quant_method', '').lower()
+
+            if 'awq' in quant_method:
+                model_format = 'awq'
+            elif 'gptq' in quant_method:
+                model_format = 'gptq'
+            elif 'compressed' in quant_method:
+                model_format = 'compressed-tensors'
+
+        if model_format is None:
+            model_name_lower = model_name.lower()
+            if 'awq' in model_name_lower:
+                model_format = 'awq'
+            elif 'gptq' in model_name_lower:
+                model_format = 'gptq'
+
+        if model_format is None:
+            model_format = 'hf'
+
+        yield f"Converting {model_name} ({model_format}) to TurboMind format with tp={tp}...\n\nThis may take several minutes."
+
+        convert_result = [None]
+        convert_error = [None]
+
+        def do_convert():
+            try:
+                convert_result[0] = convert_model_to_turbomind(str(source_path), str(output_path), model_format, tp)
+            except Exception as e:
+                convert_error[0] = e
+
+        convert_thread = threading.Thread(target=do_convert)
+        convert_thread.start()
+
+        while convert_thread.is_alive():
+            yield f"Converting... (this may take several minutes)"
+            time.sleep(2)
+
+        convert_thread.join()
+
+        if convert_error[0]:
+            raise convert_error[0]
+
+        if convert_result[0] and output_path.exists():
+            yield f"Successfully converted!\n\nConverted model saved to: `{output_path}`\n\nSelect it from the model menu and use the LMDeploy loader."
+        else:
+            yield "Conversion failed. Check the logs for details."
+
+    except Exception as e:
+        tb_str = traceback.format_exc().replace('\n', '\n\n')
+        yield f"Error during conversion:\n\n{tb_str}"
 
 
 def download_model_wrapper(repo_id, specific_file, progress=gr.Progress(), return_links=False, check=False):
@@ -384,8 +480,8 @@ def download_model_wrapper(repo_id, specific_file, progress=gr.Progress(), retur
 
 
 def update_truncation_length(current_length, state):
-    if 'loader' in state:
-        if state['loader'].lower().startswith('exllama') or state['loader'] == 'llama.cpp':
+    if 'loader' in state and state['loader']:
+        if state['loader'].lower().startswith('exllama') or state['loader'] in ('llama.cpp', 'LMDeploy'):
             if state['ctx_size'] > 0:
                 return state['ctx_size']
 
