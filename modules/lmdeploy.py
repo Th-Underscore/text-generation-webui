@@ -75,8 +75,13 @@ def convert_model_to_turbomind(model_path: str, output_dir: str, model_format: s
 
 
 class LMDeployModel:
+    def __init__(self, pipeline: Pipeline, _tokenizer: Tokenizer, _last_prompt_token_count: int):
+        self.pipeline = pipeline
+        self._tokenizer = _tokenizer
+        self._last_prompt_token_count = _last_prompt_token_count
+
     def __getattr__(self, name):
-        attr = getattr(self.pipeline, name, None) or getattr(self.pipeline.tokenizer, name, None)
+        attr = getattr(self.pipeline, name, None) or getattr(self._tokenizer, name, None)
         if attr is not None:
             return attr
         raise AttributeError(f"'LMDeployModel' object has no attribute '{name}'")
@@ -87,7 +92,7 @@ class LMDeployModel:
         return lmdeploy.device.cuda.current_device() if hasattr(lmdeploy, 'device') else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     @classmethod
-    def from_pretrained(cls, path_to_model):
+    def from_pretrained(cls, path_to_model: str | Path):
         # Resolve to absolute path so lmdeploy's internal loaders find weight files
         # regardless of the process's working directory.
         path_to_model = (Path(shared.args.model_dir) / path_to_model).resolve()
@@ -191,14 +196,11 @@ class LMDeployModel:
             logger.error(traceback.format_exc())
             return None, None
 
-        result = cls()
-        result.pipeline = pipeline
-        result._tokenizer = LMDeployTokenizerWrapper(pipeline.async_engine.tokenizer)
-        result._last_prompt_token_count = 0
+        result = cls(pipeline, LMDeployTokenizerWrapper(pipeline.async_engine.tokenizer), 0)
 
         return result, result._tokenizer
 
-    def is_multimodal(self) -> bool:
+    def is_multimodal(self):
         return False
 
     def generate_with_streaming(self, prompt, state):
@@ -213,9 +215,12 @@ class LMDeployModel:
         stop_event = state.get('stop_event')
         response_text = ""
 
+        session = None
         try:
-            for chunk in self.pipeline.stream_infer([prompt], gen_config=gen_config):
+            session = self.pipeline.session()
+            for chunk in self.pipeline.stream_infer([prompt], sessions=session, gen_config=gen_config):
                 if shared.stop_everything or (stop_event and stop_event.is_set()):
+                    session.abort()
                     break
                 if chunk:
                     token = chunk.text.decode() if isinstance(chunk.text, bytes) else str(chunk.text)
@@ -226,24 +231,13 @@ class LMDeployModel:
             yield response_text
 
     def generate(self, prompt, state):
-        gen_config = self._prepare_generation_config(state)
+        output = ''
+        for output in self.generate_with_streaming(prompt, state):
+            pass
 
-        max_new_tokens = state['max_new_tokens']
-        if state['auto_max_new_tokens']:
-            max_new_tokens = state['truncation_length'] - self._last_prompt_token_count
+        return output
 
-        gen_config.max_new_tokens = max_new_tokens
-
-        try:
-            response = self.pipeline.infer([prompt], gen_config=gen_config)
-            if response:
-                return response[0].text.decode() if isinstance(response[0].text, bytes) else str(response[0].text)
-        except Exception as e:
-            logger.error(f"Error during generation: {e}")
-
-        return ""
-
-    def _prepare_generation_config(self, state) -> GenerationConfig:
+    def _prepare_generation_config(self, state):
         temperature = state['temperature']
         if state['dynamic_temperature']:
             temperature = (state['dynatemp_low'] + state['dynatemp_high']) / 2
