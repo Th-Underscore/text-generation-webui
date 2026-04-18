@@ -31,6 +31,7 @@ def load_model(model_name, loader=None):
         'ExLlamav3_HF': ExLlamav3_HF_loader,
         'ExLlamav3': ExLlamav3_loader,
         'TensorRT-LLM': TensorRT_LLM_loader,
+        'LMDeploy': LMDeploy_loader,
     }
 
     metadata = get_model_metadata(model_name)
@@ -64,14 +65,14 @@ def load_model(model_name, loader=None):
         return None, None
 
     shared.settings.update({k: v for k, v in metadata.items() if k in shared.settings})
-    if loader.lower().startswith('exllama') or loader.lower().startswith('tensorrt') or loader == 'llama.cpp':
+    if loader.lower().startswith('exllama') or loader.lower().startswith('tensorrt') or loader == 'llama.cpp' or loader == 'LMDeploy':
         if shared.args.ctx_size > 0:
             shared.settings['truncation_length'] = shared.args.ctx_size
         elif loader == 'llama.cpp' and hasattr(model, 'n_ctx') and model.n_ctx:
             shared.settings['truncation_length'] = model.n_ctx
 
     shared.is_multimodal = False
-    if loader.lower() in ('exllamav3', 'llama.cpp') and hasattr(model, 'is_multimodal'):
+    if loader.lower() in ('exllamav3', 'llama.cpp', 'lmdeploy') and hasattr(model, 'is_multimodal'):
         shared.is_multimodal = model.is_multimodal()
 
     logger.info(f"Loaded \"{model_name}\" in {(time.time()-t0):.2f} seconds.")
@@ -131,6 +132,12 @@ def TensorRT_LLM_loader(model_name):
     return model, model.tokenizer
 
 
+def LMDeploy_loader(model_name):
+    from modules.lmdeploy import LMDeployModel
+
+    return LMDeployModel.from_pretrained(model_name)
+
+
 def unload_model(keep_model_name=False):
     if shared.model is None:
         return
@@ -138,7 +145,7 @@ def unload_model(keep_model_name=False):
     model_class_name = shared.model.__class__.__name__
     is_llamacpp = (model_class_name == 'LlamaServer')
 
-    if model_class_name in ['Exllamav3Model', 'Exllamav3HF', 'TensorRTLLMModel']:
+    if model_class_name in ['Exllamav3Model', 'Exllamav3HF', 'TensorRTLLMModel', 'LMDeployModel']:
         shared.model.unload()
     elif model_class_name == 'LlamaServer':
         shared.model.stop()

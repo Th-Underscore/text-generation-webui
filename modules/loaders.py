@@ -73,6 +73,14 @@ loaders_and_params = OrderedDict({
     'TensorRT-LLM': [
         'ctx_size',
         'tensorrt_llm_info',
+    ],
+    'LMDeploy': [
+        'ctx_size',
+        'cache_type',
+        'backend',
+        'max_batch_size',
+        'tensor_parallel',
+        'cache_max_entry_count',
     ]
 })
 
@@ -258,6 +266,19 @@ loaders_samplers = {
         'add_bos_token',
         'skip_special_tokens',
         'seed',
+    },
+    'LMDeploy': {
+        'temperature',
+        'top_p',
+        'top_k',
+        'repetition_penalty',
+        'frequency_penalty',
+        'presence_penalty',
+        'auto_max_new_tokens',
+        'ban_eos_token',
+        'add_bos_token',
+        'skip_special_tokens',
+        'seed',
     }
 }
 
@@ -278,7 +299,7 @@ def blacklist_samplers(loader, dynamic_temperature):
     output = []
 
     for sampler in all_samplers:
-        if loader == 'All' or sampler in loaders_samplers[loader]:
+        if loader is None or loader == 'All' or sampler in loaders_samplers.get(loader, set()):
             if sampler.startswith('dynatemp'):
                 output.append(gr.update(visible=dynamic_temperature))
             else:
@@ -351,6 +372,10 @@ def list_model_elements():
         'spec_ngram_size_m',
         'spec_ngram_min_hits',
         'mmproj',
+        'backend',
+        'max_batch_size',
+        'tensor_parallel',
+        'cache_max_entry_count',
     ]
 
     from modules import shared

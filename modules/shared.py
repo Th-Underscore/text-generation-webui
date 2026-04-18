@@ -72,12 +72,12 @@ group.add_argument('--image-quant', type=str, default=None,
 
 # Model loader
 group = parser.add_argument_group('Model loader')
-group.add_argument('--loader', type=str, help='Choose the model loader manually, otherwise, it will get autodetected. Valid options: Transformers, llama.cpp, ExLlamav3_HF, ExLlamav3, TensorRT-LLM.')
+group.add_argument('--loader', type=str, help='Choose the model loader manually, otherwise, it will get autodetected. Valid options: Transformers, llama.cpp, ExLlamav3_HF, ExLlamav3, TensorRT-LLM, LMDeploy.')
 
 # Cache
 group = parser.add_argument_group('Context and cache')
 group.add_argument('--ctx-size', '--n_ctx', '--max_seq_len', type=int, default=0, metavar='N', help='Context size in tokens. 0 = auto for llama.cpp (requires gpu-layers=-1), 8192 for other loaders.')
-group.add_argument('--cache-type', '--cache_type', type=str, default='fp16', metavar='N', help='KV cache type; valid options: llama.cpp - fp16, q8_0, q4_0; ExLlamaV3 - fp16, q2 to q8 (can specify k_bits and v_bits separately, e.g. q4_q8).')
+group.add_argument('--cache-type', '--cache_type', type=str, default='fp16', metavar='N', help='KV cache type; valid options: llama.cpp - fp16, q8_0, q4_0; ExLlamaV3 - fp16, q2 to q8 (can specify k_bits and v_bits separately, e.g. q4_q8); LMDeploy - fp16, q8, q4.')
 
 # Speculative decoding
 group = parser.add_argument_group('Speculative decoding')
@@ -139,6 +139,13 @@ group.add_argument('--gpu-split', type=str, help='Comma-separated list of VRAM (
 group.add_argument('--enable-tp', '--enable_tp', action='store_true', help='Enable Tensor Parallelism (TP) to split the model across GPUs.')
 group.add_argument('--tp-backend', type=str, default='native', help='The backend for tensor parallelism. Valid options: native, nccl. Default: native.')
 group.add_argument('--cfg-cache', action='store_true', help='Create an additional cache for CFG negative prompts. Necessary to use CFG with that loader.')
+
+# LMDeploy
+group = parser.add_argument_group('LMDeploy')
+group.add_argument('--backend', type=str, default='turbomind', help='Inference backend: turbomind or pytorch.')
+group.add_argument('--max-batch-size', type=int, default=32, help='Maximum batch size.')
+group.add_argument('--tensor-parallel', type=int, default=1, help='Tensor parallelism degree.')
+group.add_argument('--cache-max-entry-count', type=float, default=0.3, help='Percentage of free GPU memory for KV cache (0.0-1.0). Lower values reduce memory usage.')
 
 # Gradio
 group = parser.add_argument_group('Gradio')
@@ -435,6 +442,8 @@ def fix_loader_name(name):
         return 'ExLlamav3'
     elif name in ['tensorrt', 'tensorrtllm', 'tensorrt_llm', 'tensorrt-llm', 'tensort', 'tensortllm']:
         return 'TensorRT-LLM'
+    elif name in ['lmdeploy', 'lm-deploy', 'lm_deploy', 'lmdeployturbomind']:
+        return 'LMDeploy'
 
 
 def is_chat():

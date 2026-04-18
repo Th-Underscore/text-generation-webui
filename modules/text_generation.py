@@ -53,7 +53,7 @@ def _generate_reply(question, state, stopping_strings=None, is_chat=False, escap
             yield ''
             return
 
-        if shared.model.__class__.__name__ in ['LlamaServer', 'Exllamav3Model', 'TensorRTLLMModel']:
+        if shared.model.__class__.__name__ in ['LlamaServer', 'Exllamav3Model', 'TensorRTLLMModel', 'LMDeployModel']:
             generate_func = generate_reply_custom
         else:
             generate_func = generate_reply_HF
@@ -135,7 +135,7 @@ def encode(prompt, add_special_tokens=True, add_bos_token=True, truncation_lengt
             raise ValueError('No tokenizer is loaded')
 
     # llama.cpp case
-    if shared.model.__class__.__name__ == 'LlamaServer':
+    if shared.model.__class__.__name__ in ['LlamaServer', 'LMDeployModel']:
         input_ids = shared.tokenizer.encode(str(prompt), add_bos_token=add_bos_token)
         input_ids = np.array(input_ids).reshape(1, len(input_ids))
 
