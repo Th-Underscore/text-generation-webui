@@ -113,6 +113,7 @@ class LMDeployModel:
         if backend == 'turbomind':
             engine_config = TurbomindEngineConfig(
                 tp=tp,
+                # cp=tp,
                 session_len=ctx_size,
                 max_batch_size=max_batch_size,
                 quant_policy=quant_policy,
@@ -239,6 +240,7 @@ class LMDeployModel:
     def unload(self):
         logger.info("Unloading LMDeploy model...")
         if hasattr(self, 'pipeline'):
+            self.pipeline.close()
             del self.pipeline
             self.pipeline = None
         if hasattr(self, '_tokenizer'):
