@@ -1,9 +1,7 @@
+import asyncio
 import gc
 import os
-import threading
-import queue
 from pathlib import Path
-from typing import Any, List, Optional, Tuple
 
 import lmdeploy
 from lmdeploy import Pipeline, PytorchEngineConfig, TurbomindEngineConfig, Tokenizer
@@ -79,12 +77,17 @@ class LMDeployModel:
         self.pipeline = pipeline
         self._tokenizer = _tokenizer
         self._last_prompt_token_count = _last_prompt_token_count
+        self._session = None
 
     def __getattr__(self, name):
         attr = getattr(self.pipeline, name, None) or getattr(self._tokenizer, name, None)
         if attr is not None:
             return attr
         raise AttributeError(f"'LMDeployModel' object has no attribute '{name}'")
+
+    def _run(self, coro):
+        loop = self.pipeline.internal_thread.loop
+        return asyncio.run_coroutine_threadsafe(coro, loop).result()
 
     @property
     def device(self):
@@ -113,7 +116,7 @@ class LMDeployModel:
         if backend == 'turbomind':
             engine_config = TurbomindEngineConfig(
                 tp=tp,
-                # cp=tp,
+                cp=tp,
                 session_len=ctx_size,
                 max_batch_size=max_batch_size,
                 quant_policy=quant_policy,
@@ -174,17 +177,41 @@ class LMDeployModel:
         stop_event = state.get('stop_event')
         response_text = ""
 
-        session = None
+        input_ids = self.encode(prompt, add_bos=False)
+        self._last_prompt_token_count = len(input_ids)
+
         try:
-            session = self.pipeline.session()
-            for chunk in self.pipeline.stream_infer(prompt, sessions=session, gen_config=gen_config):
-                if shared.stop_everything or (stop_event and stop_event.is_set()):
-                    session.abort()
-                    break
-                if chunk:
-                    token = chunk.text.decode() if isinstance(chunk.text, bytes) else str(chunk.text)
-                    response_text += token
+            output_queue = asyncio.Queue()
+
+            async def run_async():
+                session = self.pipeline.session()
+                async for out in self.pipeline.async_engine.generate(
+                    messages=None,
+                    session_id=session,
+                    gen_config=gen_config,
+                    input_ids=input_ids,
+                    do_preprocess=False,
+                    stream_response=True,
+                ):
+                    if shared.stop_everything or (stop_event and stop_event.is_set()):
+                        break
+                    await output_queue.put(out.response if out.response else '')
+
+            loop = self.pipeline.internal_thread.loop
+            future = asyncio.run_coroutine_threadsafe(run_async(), loop)
+
+            while not future.done():
+                try:
+                    text = output_queue.get_nowait()
+                    response_text += text
                     yield response_text
+                except asyncio.QueueEmpty:
+                    pass
+
+            if shared.stop_everything or (stop_event and stop_event.is_set()):
+                logger.warning("Generation stopped by user.")
+        except (GeneratorExit, StopIteration, asyncio.CancelledError):
+            pass
         except Exception as e:
             logger.error(f"Error during generation: {e}")
             yield response_text
