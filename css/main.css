@@ -579,11 +579,14 @@ audio {
     padding: 1px 3px;
     background: #f3f4f6 !important;
     color: #1f2328;
+    scrollbar-width: thin;
+    scrollbar-color: var(--neutral-300) transparent;
 }
 
 .dark .message-body pre > code {
     background: #0d1117 !important;
     color: rgb(201 209 217);
+    scrollbar-color: rgb(255 255 255 / 6.25%) transparent;
 }
 
 .message-body pre > code {
@@ -614,7 +617,7 @@ audio {
     background: #f3f4f6;
     padding: 0.675rem 2.5rem 0.6rem;
     margin-top: 0.15rem;
-    border: 1px solid #d2d2d8;
+    border: 1px solid var(--border-color-primary);
     border-radius: 1.5rem;
     overflow-y: auto !important;
 }
@@ -1265,22 +1268,6 @@ audio {
     }
 }
 
-@media screen and (min-width: 1470px) {
-    #chat-controls,
-    #past-chats-row {
-        position: fixed;
-        top: 0;
-        background: var(--background-fill-primary);
-    }
-
-    #past-chats-row {
-        left: var(--header-width);
-    }
-
-    #chat-controls {
-        right: 0;
-    }
-}
 
 /* ----------------------------------------------
   Dark theme
@@ -1489,7 +1476,7 @@ audio {
 
 .block:has(> .label-wrap) {
     padding: 10px 12px !important;
-    border: 1px solid #d2d2d8;
+    border: 1px solid var(--border-color-primary);
 }
 
 .dark .block:has(> .label-wrap) {
@@ -1662,7 +1649,7 @@ strong {
     max-height: 65vh;
     padding: 10px;
     border-radius: 0.5rem;
-    border: 1px solid #ccc;
+    border: 1px solid var(--border-color-primary);
     background-color: var(--light-theme-gray);
     font-family: inherit;
     font-size: inherit;
@@ -1688,7 +1675,7 @@ strong {
 
 .edit-control-button {
     padding: 6px 12px;
-    border: 1px solid #ccc;
+    border: 1px solid var(--border-color-primary);
     border-radius: 0.75rem;
     cursor: pointer;
     background-color: #f8f9fa;
