@@ -64,11 +64,11 @@ def create_ui():
                                 '* You can load either a pre-built TensorRT engine or a regular HF model. '
                                 'HF models will be compiled to a TensorRT engine automatically on each load (this can take a while).'
                             )
-                            shared.gradio['aphrodite_info'] = gr.Markdown(
-                                '* Aphrodite Engine has to be installed manually: `pip install aphrodite-engine`.\n\n'
+                            shared.gradio['vllm_info'] = gr.Markdown(
+                                '* 1Cat-vLLM (vLLM fork) has to be installed manually: `pip install https://github.com/1CatAI/1Cat-vLLM/releases/download/v0.0.2/vllm-0.0.2.dev0+g55573923a.d20260321.cu128-cp312-cp312-linux_x86_64.whl`.\n\n'
                                 '* For multi-GPU tensor parallelism, set tensor_parallel_size to the number of GPUs.\n'
                                 '* Adjust gpu_memory_utilization to leave VRAM for TGW extensions (e.g. 0.85).\n'
-                                '* Aphrodite runs as a server process - disable Flash Attention for older GPUs (V100).'
+                                '* vLLM runs as a server process - disable Flash Attention for older GPUs (V100).'
                             )
                             shared.gradio['tensor_parallel_size'] = gr.Slider(
                                 label="tensor_parallel_size", minimum=1, step=1, maximum=8, value=getattr(shared.args, 'tensor_parallel_size', 1),
@@ -81,6 +81,10 @@ def create_ui():
                             shared.gradio['max_num_seqs'] = gr.Slider(
                                 label="max_num_seqs", minimum=1, maximum=256, step=1, value=getattr(shared.args, 'max_num_seqs', 64),
                                 info='Maximum number of sequences.'
+                            )
+                            shared.gradio['max_num_batched_tokens'] = gr.Slider(
+                                label="max_num_batched_tokens", minimum=256, step=256, maximum=16384, value=getattr(shared.args, 'max_num_batched_tokens', 2048),
+                                info='Maximum number of batched tokens per step.'
                             )
                             shared.gradio['gpu_devices'] = gr.Textbox(
                                 label="gpu_devices", value=getattr(shared.args, 'gpu_devices', '0,1'),
@@ -96,6 +100,12 @@ def create_ui():
                                 label="enforce_eager", value=getattr(shared.args, 'enforce_eager', False),
                                 info='Disable CUDA graph optimization (may fix issues on some GPUs).',
                                 interactive=True
+                            )
+                            shared.gradio['quantization'] = gr.Dropdown(
+                                label="quantization",
+                                value=getattr(shared.args, 'quantization', 'None'),
+                                choices=['None', 'awq', 'gptq', 'fp8', 'marlin', 'qqq', 'experts_int8'],
+                                info='Quantization type for the model (e.g., awq for AWQ models).'
                             )
 
                             # Multimodal

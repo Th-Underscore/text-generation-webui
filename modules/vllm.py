@@ -15,7 +15,7 @@ from modules import shared
 from modules.logging_colors import logger
 
 
-class AphroditeServer:
+class vLLMServer:
     def __init__(self, model_name: str, server_port: Optional[int] = None):
         self.model_name = model_name
         self.model_path = Path(shared.args.model_dir) / model_name
@@ -49,43 +49,59 @@ class AphroditeServer:
         raise RuntimeError("Could not find available port")
 
     def _get_engine_args(self) -> List[str]:
-        """Build command-line arguments for aphrodite engine."""
+        """Build command-line arguments for 1Cat-vLLM engine."""
         tensor_parallel_size = getattr(shared.args, 'tensor_parallel_size', 1)
-        gpu_memory_utilization = getattr(shared.args, 'gpu_memory_utilization', 0.85)
-        max_num_seqs = getattr(shared.args, 'max_num_seqs', 64)
+        gpu_memory_utilization = getattr(shared.args, 'gpu_memory_utilization', 0.90)
+        max_num_seqs = getattr(shared.args, 'max_num_seqs', 4)
+        max_num_batched_tokens = getattr(shared.args, 'max_num_batched_tokens', 2048)
         ctx_size = shared.args.ctx_size if shared.args.ctx_size > 0 else 8192
         gpu_devices = getattr(shared.args, 'gpu_devices', None)
-        attention_backend = getattr(shared.args, 'attention_backend', 'auto')
-        kv_cache_dtype = getattr(shared.args, 'kv_cache_dtype', 'auto')
+        quantization = getattr(shared.args, 'quantization', None)
         enforce_eager = getattr(shared.args, 'enforce_eager', False)
         extra_flags = getattr(shared.args, 'extra_flags', '')
 
+        # Detect SM70 (Volta) and set SM70-specific flags
+        capability = self._get_device_capability()
+        is_sm70 = capability is not None and capability[0] == 7
+
         args = [
-            "aphrodite",
-            "run",
+            "vllm",
+            "serve",
             str(self.model_path),
             "--host", "127.0.0.1",
             "--port", str(self.port),
             "--tensor-parallel-size", str(tensor_parallel_size),
             "--gpu-memory-utilization", str(gpu_memory_utilization),
             "--max-num-seqs", str(max_num_seqs),
+            "--max-num-batched-tokens", str(max_num_batched_tokens),
             "--max-model-len", str(ctx_size),
-            "--enforce-eager" if enforce_eager else "",
             "--uvicorn-log-level", "info",
-            "--disable-frontend-multiprocessing", "--single-user-mode",
+            "--disable-frontend-multiprocessing",
         ]
 
-        if attention_backend != 'auto':
-            args.extend(["--attention-backend", attention_backend])
+        if enforce_eager:
+            args.append("--enforce-eager")
 
-        if kv_cache_dtype != 'auto':
-            args.extend(["--kv-cache-dtype", kv_cache_dtype])
+        # SM70-specific flags
+        if is_sm70:
+            args.extend(["--attention-backend", "triton_attn"])
+            args.extend(["--skip-mm-profiling"])
+            args.extend(["--limit-mm-per-prompt", '{"image":0,"video":0}'])
+            args.extend(["--compilation-config",
+                         '{"cudagraph_mode":"full_and_piecewise","cudagraph_capture_sizes":[1]}'])
+            args.append("--enable-tokenizer-info-endpoint")
 
-        # Use full path to aphrodite if available
+        if quantization:
+            args.extend(["--quantization", quantization])
+
+        if is_sm70:
+            args.extend(["--dtype", "float16"])
+
+        # Use full path to vllm if available
         import shutil
-        aphrodite_path = shutil.which("aphrodite")
-        if aphrodite_path:
-            args[0] = aphrodite_path
+        vllm_path = shutil.which("vllm")
+        if vllm_path:
+            args[0] = vllm_path
 
         if gpu_devices:
             valid_devices = []
@@ -100,20 +116,29 @@ class AphroditeServer:
             if valid_devices:
                 os.environ['CUDA_VISIBLE_DEVICES'] = ','.join(map(str, valid_devices))
 
-        extra_flags = getattr(shared.args, 'extra_flags', '')
         if extra_flags:
             args.extend(extra_flags.split())
 
         return [arg for arg in args if arg]
 
+    def _get_device_capability(self):
+        """Get CUDA device capability, returns (major, minor) or None."""
+        try:
+            import torch
+            if torch.cuda.is_available():
+                return torch.cuda.get_device_capability(0)
+        except Exception:
+            pass
+        return None
+
     def _start_server(self):
-        """Start the aphrodite server as a subprocess."""
+        """Start the 1Cat-vLLM server as a subprocess."""
         cmd = self._get_engine_args()
-        logger.info(f"Starting Aphrodite server: {' '.join(cmd)}")
+        logger.info(f"Starting 1Cat-vLLM server: {' '.join(cmd)}")
 
         env = os.environ.copy()
         
-        # Add PyTorch library path for aphrodite-kernels
+        # Add PyTorch library path for 1Cat-vLLM
         import torch
         torch_lib = str(Path(torch.__file__).parent / "lib")
         if 'LD_LIBRARY_PATH' in env:
@@ -124,7 +149,6 @@ class AphroditeServer:
         env.update({
             'PYTHONUNBUFFERED': '1',
             'TRANSFORMERS_VERBOSITY': 'error',
-            'APHRODITE_USE_V1': '1',
         })
 
         self.process = subprocess.Popen(
@@ -144,11 +168,11 @@ class AphroditeServer:
             for line in self.process.stderr:
                 if line.strip():
                     if "ERROR" in line or "Traceback" in line:
-                        logger.error(f"Aphrodite: {line.strip()}")
+                        logger.error(f"1Cat-vLLM: {line.strip()}")
                     elif "WARN" in line:
-                        logger.warning(f"Aphrodite: {line.strip()}")
+                        logger.warning(f"1Cat-vLLM: {line.strip()}")
                     else:
-                        logger.info(f"Aphrodite: {line.strip()}")
+                        logger.info(f"1Cat-vLLM: {line.strip()}")
 
     def _wait_for_server(self, timeout: int = 1200):
         start_time = time.time()
@@ -159,43 +183,56 @@ class AphroditeServer:
                     data = response.json()
                     if data.get("data"):
                         self.model_id = data["data"][0]["id"]
-                    logger.info(f"Aphrodite server ready at {self.base_url} (model_id={self.model_id!r})")
+                    logger.info(f"1Cat-vLLM server ready at {self.base_url} (model_id={self.model_id!r})")
                     return
             except requests.exceptions.RequestException:
                 pass
             time.sleep(1)
 
-        raise RuntimeError(f"Aphrodite server failed to start within {timeout}s")
+        raise RuntimeError(f"1Cat-vLLM server failed to start within {timeout}s")
 
     def _load_tokenizer_info(self):
         """Fetch tokenizer info from the server."""
+        # 1Cat-vLLM exposes /tokenizers/info when --enable-tokenizer-info-endpoint is set
         try:
-            response = self.session.get(f"{self.base_url}/get_tokenizer_info", timeout=10)
+            response = self.session.get(f"{self.base_url}/tokenizers/info", timeout=10)
             if response.status_code == 200:
                 data = response.json()
-                self.bos_token_id = data.get("bos_token_id", 1)
-                self.eos_token_id = data.get("eos_token_id", 151643)
-                self.bos_token = data.get("bos_token", self.bos_token)
-                logger.info(f"Aphrodite tokenizer info: bos={self.bos_token_id}, eos={self.eos_token_id}")
+                bos = data.get("bos_token_id") or data.get("bos_token")
+                eos = data.get("eos_token_id") or data.get("eos_token")
+                if bos is not None:
+                    self.bos_token_id = int(bos) if not isinstance(bos, int) else bos
+                if eos is not None:
+                    self.eos_token_id = int(eos) if not isinstance(eos, int) else eos
+                if isinstance(bos, str):
+                    self.bos_token = bos
+                logger.info(f"1Cat-vLLM tokenizer info: bos={self.bos_token_id}, eos={self.eos_token_id}")
+                return
         except Exception:
-            try:
-                response = self.session.get(f"{self.base_url}/v1/models", timeout=10)
-                if response.status_code == 200:
-                    data = response.json()
-                    if data.get("data"):
-                        model_data = data["data"][0]
-                        if hasattr(model_data, 'settings'):
-                            settings = model_data.get("settings", {})
-                            self.bos_token_id = settings.get("bos_token_id", 1)
-                            self.eos_token_id = settings.get("eos_token_id", 151643)
-            except Exception:
-                pass
+            pass
 
-            if self.bos_token_id is None:
-                self.bos_token_id = 1
-            if self.eos_token_id is None:
-                self.eos_token_id = 151643
-            logger.warning(f"Using default tokenizer info: bos={self.bos_token_id}, eos={self.eos_token_id}")
+        # Fallback: try /v1/models settings
+        try:
+            response = self.session.get(f"{self.base_url}/v1/models", timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("data"):
+                    model_data = data["data"][0]
+                    settings = model_data.get("settings", {})
+                    bos = settings.get("bos_token_id")
+                    eos = settings.get("eos_token_id")
+                    if bos is not None:
+                        self.bos_token_id = int(bos) if not isinstance(bos, int) else bos
+                    if eos is not None:
+                        self.eos_token_id = int(eos) if not isinstance(eos, int) else eos
+        except Exception:
+            pass
+
+        if self.bos_token_id is None:
+            self.bos_token_id = 1
+        if self.eos_token_id is None:
+            self.eos_token_id = 151643
+        logger.warning(f"Using default tokenizer info: bos={self.bos_token_id}, eos={self.eos_token_id}")
 
     def encode(self, text: str, add_bos_token: bool = False, **kwargs) -> List[int]:
         url = f"{self.base_url}/v1/tokenize"
@@ -211,7 +248,7 @@ class AphroditeServer:
             result = response.json()
             return result.get("tokens", result.get("token_ids",[]))
         except Exception as e:
-            logger.error(f"Aphrodite encode error: {e}")
+            logger.error(f"1Cat-vLLM encode error: {e}")
             return [0] * max(1, int(len(text) / 3.5))
 
     def decode(self, token_ids: List[int], **kwargs) -> str:
@@ -227,7 +264,7 @@ class AphroditeServer:
             result = response.json()
             return result.get("prompt", result.get("content", ""))
         except Exception as e:
-            logger.error(f"Aphrodite decode error: {e}")
+            logger.error(f"1Cat-vLLM decode error: {e}")
             return ""
 
     def convert_ids_to_tokens(self, ids, **kwargs):
@@ -260,7 +297,7 @@ class AphroditeServer:
         if state.get("ban_eos_token"):
             payload["ignore_eos"] = True
 
-        # Handle max_tokens correctly for Aphrodite's strict requirements
+        # Handle max_tokens correctly for vLLM's strict requirements
         max_new_tokens = state.get("max_new_tokens", 256)
         auto_max_new_tokens = state.get("auto_max_new_tokens", False)
 
@@ -290,7 +327,7 @@ class AphroditeServer:
         payload["stream"] = True
 
         if shared.args.verbose:
-            logger.info("APHRODITE_PARAMS=")
+            logger.info("1CAT_VLLM_PARAMS=")
             printable_payload = {k: v for k, v in payload.items() if k != "prompt"}
             pprint.PrettyPrinter(indent=4, sort_dicts=False).pprint(printable_payload)
             print()
@@ -298,7 +335,7 @@ class AphroditeServer:
         response = self.session.post(url, json=payload, stream=True)
         try:
             if response.status_code == 400 and response.json().get("error", {}).get("type") in["BadRequestError", "invalid_request_error"]:
-                logger.error(f"Aphrodite completions error: {response.json().get('error', {}).get('message', '')}")
+                logger.error(f"1Cat-vLLM completions error: {response.json().get('error', {}).get('message', '')}")
                 return
             else:
                 response.raise_for_status()
@@ -348,7 +385,7 @@ class AphroditeServer:
             except subprocess.TimeoutExpired:
                 self.process.kill()
             self.process = None
-            logger.info("Aphrodite server stopped")
+            logger.info("1Cat-vLLM server stopped")
 
     def stop(self):
         """Alias for unload for compatibility."""

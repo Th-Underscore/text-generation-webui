@@ -74,16 +74,17 @@ loaders_and_params = OrderedDict({
         'ctx_size',
         'tensorrt_llm_info',
     ],
-    'Aphrodite': [
+    '1Cat-vLLM': [
         'ctx_size',
         'tensor_parallel_size',
         'gpu_memory_utilization',
         'max_num_seqs',
+        'max_num_batched_tokens',
         'gpu_devices',
-        'attention_backend',
+        'quantization',
         'enforce_eager',
         'extra_flags',
-        'aphrodite_info',
+        'vllm_info',
     ]
 })
 
@@ -270,7 +271,7 @@ loaders_samplers = {
         'skip_special_tokens',
         'seed',
     },
-    'Aphrodite': {
+    '1Cat-vLLM': {
         'temperature',
         'top_p',
         'top_k',
@@ -381,8 +382,9 @@ def list_model_elements():
         'gpu_memory_utilization',
         'max_num_seqs',
         'gpu_devices',
-        'attention_backend', 
         'enforce_eager',
+        'max_num_batched_tokens',
+        'quantization',
     ]
 
     from modules import shared

@@ -31,7 +31,7 @@ def load_model(model_name, loader=None):
         'ExLlamav3_HF': ExLlamav3_HF_loader,
         'ExLlamav3': ExLlamav3_loader,
         'TensorRT-LLM': TensorRT_LLM_loader,
-        'Aphrodite': aphrodite_loader,
+        '1Cat-vLLM': vllm_loader,
     }
 
     metadata = get_model_metadata(model_name)
@@ -65,7 +65,7 @@ def load_model(model_name, loader=None):
         return None, None
 
     shared.settings.update({k: v for k, v in metadata.items() if k in shared.settings})
-    if loader.lower().startswith('exllama') or loader.lower().startswith('tensorrt') or loader in ['llama.cpp', 'Aphrodite']:
+    if loader.lower().startswith('exllama') or loader.lower().startswith('tensorrt') or loader in ['llama.cpp', '1Cat-vLLM']:
         if shared.args.ctx_size > 0:
             shared.settings['truncation_length'] = shared.args.ctx_size
         elif loader == 'llama.cpp' and hasattr(model, 'n_ctx') and model.n_ctx:
@@ -132,10 +132,10 @@ def TensorRT_LLM_loader(model_name):
     return model, model.tokenizer
 
 
-def aphrodite_loader(model_name):
-    from modules.aphrodite_loader import AphroditeServer
+def vllm_loader(model_name):
+    from modules.vllm import vLLMServer
 
-    model = AphroditeServer(model_name)
+    model = vLLMServer(model_name)
     return model, model
 
 
@@ -148,7 +148,7 @@ def unload_model(keep_model_name=False):
 
     if model_class_name in ['Exllamav3Model', 'Exllamav3HF', 'TensorRTLLMModel']:
         shared.model.unload()
-    elif model_class_name in ['LlamaServer', 'AphroditeServer']:
+    elif model_class_name in ['LlamaServer', 'vLLMServer']:
         shared.model.stop()
 
     shared.model = shared.tokenizer = None
