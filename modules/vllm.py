@@ -10,6 +10,11 @@ from pathlib import Path
 from typing import Any, List, Optional
 
 import requests
+try:
+    from transformers import AutoTokenizer
+    TRANSFORMERS_AVAILABLE = True
+except ImportError:
+    TRANSFORMERS_AVAILABLE = False
 
 from modules import shared
 from modules.logging_colors import logger
@@ -31,6 +36,14 @@ class vLLMServer:
         self.last_prompt_token_count = 0
 
         self.model_id = str(self.model_path)
+
+        self.tokenizer = None
+        if TRANSFORMERS_AVAILABLE:
+            try:
+                self.tokenizer = AutoTokenizer.from_pretrained(str(self.model_path), trust_remote_code=True)
+                logger.info(f"Loaded local tokenizer from {self.model_path}")
+            except Exception as e:
+                logger.warning(f"Failed to load local tokenizer: {e}")
 
         self._start_server()
         self._wait_for_server()
@@ -75,27 +88,18 @@ class vLLMServer:
             "--max-num-seqs", str(max_num_seqs),
             "--max-num-batched-tokens", str(max_num_batched_tokens),
             "--max-model-len", str(ctx_size),
-            "--uvicorn-log-level", "info",
-            "--disable-frontend-multiprocessing",
         ]
 
         if enforce_eager:
             args.append("--enforce-eager")
 
-        # SM70-specific flags
+        # SM70-specific flags - match working command
         if is_sm70:
             args.extend(["--attention-backend", "triton_attn"])
             args.extend(["--skip-mm-profiling"])
             args.extend(["--limit-mm-per-prompt", '{"image":0,"video":0}'])
-            args.extend(["--compilation-config",
-                         '{"cudagraph_mode":"full_and_piecewise","cudagraph_capture_sizes":[1]}'])
-            args.append("--enable-tokenizer-info-endpoint")
-
-        if quantization:
-            args.extend(["--quantization", quantization])
-
-        if is_sm70:
-            args.extend(["--dtype", "float16"])
+            args.extend(["--compilation-config", '{"mode":"none","cudagraph_mode":"full_and_piecewise","cudagraph_capture_sizes":[1]}'])
+        # Note: don't add --quantization, let vLLM auto-detect
 
         # Use full path to vllm if available
         import shutil
@@ -149,6 +153,7 @@ class vLLMServer:
         env.update({
             'PYTHONUNBUFFERED': '1',
             'TRANSFORMERS_VERBOSITY': 'error',
+            'VLLM_WORKER_MULTIPROC_METHOD': 'fork',
         })
 
         self.process = subprocess.Popen(
@@ -193,6 +198,16 @@ class vLLMServer:
 
     def _load_tokenizer_info(self):
         """Fetch tokenizer info from the server."""
+        if self.tokenizer is not None:
+            try:
+                self.bos_token_id = self.tokenizer.bos_token_id
+                self.eos_token_id = self.tokenizer.eos_token_id
+                self.bos_token = self.tokenizer.bos_token
+                logger.info(f"Loaded tokenizer info from local tokenizer: bos={self.bos_token_id}, eos={self.eos_token_id}")
+                return
+            except Exception as e:
+                logger.warning(f"Failed to get tokenizer info from local tokenizer: {e}")
+
         # 1Cat-vLLM exposes /tokenizers/info when --enable-tokenizer-info-endpoint is set
         try:
             response = self.session.get(f"{self.base_url}/tokenizers/info", timeout=10)
@@ -235,6 +250,15 @@ class vLLMServer:
         logger.warning(f"Using default tokenizer info: bos={self.bos_token_id}, eos={self.eos_token_id}")
 
     def encode(self, text: str, add_bos_token: bool = False, **kwargs) -> List[int]:
+        if self.tokenizer is not None:
+            try:
+                inputs = self.tokenizer(text, add_special_tokens=add_bos_token, return_tensors="pt")
+                token_ids = inputs["input_ids"].tolist()[0]
+                logger.info(f"Encoded {text[:50]}... to {len(token_ids)} tokens: {token_ids[:20]}...")
+                return token_ids
+            except Exception as e:
+                logger.warning(f"Local tokenizer encode failed: {e}, falling back to API")
+
         url = f"{self.base_url}/v1/tokenize"
         payload = {
             "model": self.model_id,
@@ -252,6 +276,14 @@ class vLLMServer:
             return [0] * max(1, int(len(text) / 3.5))
 
     def decode(self, token_ids: List[int], **kwargs) -> str:
+        if self.tokenizer is not None:
+            try:
+                text = self.tokenizer.decode(token_ids)
+                logger.info(f"Decoded {token_ids[:20]}... to: {text[:100]}...")
+                return text
+            except Exception as e:
+                logger.warning(f"Local tokenizer decode failed: {e}, falling back to API")
+
         url = f"{self.base_url}/v1/detokenize"
         payload = {
             "model": self.model_id,
@@ -284,7 +316,9 @@ class vLLMServer:
             "repetition_penalty": state.get("repetition_penalty", 1.0),
             "presence_penalty": state.get("presence_penalty", 0.0),
             "frequency_penalty": state.get("frequency_penalty", 0.0),
-            "stop":[],
+            "stop": [],
+            "skip_special_tokens": False,
+            "spaces_between_special_tokens": False,
         }
 
         seed = state.get("seed", -1)
@@ -315,27 +349,28 @@ class vLLMServer:
         return payload
 
     def generate_with_streaming(self, prompt: str, state: dict, **kwargs):
-        """Generate text with streaming."""
-        url = f"{self.base_url}/v1/completions"
+        """Generate text with streaming - uses chat/completions API."""
+        url = f"{self.base_url}/v1/chat/completions"
 
-        # Encode first to get the token count
-        token_ids = self.encode(prompt, add_bos_token=state.get("add_bos_token", False))
-        self.last_prompt_token_count = len(token_ids)
-
-        payload = self.prepare_payload(state, self.last_prompt_token_count)
-        payload["prompt"] = prompt
-        payload["stream"] = True
+        payload = {
+            "model": self.model_id,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": state.get("temperature", 1.0),
+            "top_p": state.get("top_p", 1.0),
+            "max_tokens": state.get("max_new_tokens", 256),
+            "seed": state.get("seed", -1) if state.get("seed", -1) != -1 else None,
+            "stream": True,
+        }
 
         if shared.args.verbose:
             logger.info("1CAT_VLLM_PARAMS=")
-            printable_payload = {k: v for k, v in payload.items() if k != "prompt"}
-            pprint.PrettyPrinter(indent=4, sort_dicts=False).pprint(printable_payload)
+            pprint.PrettyPrinter(indent=4, sort_dicts=False).pprint(payload)
             print()
 
         response = self.session.post(url, json=payload, stream=True)
         try:
-            if response.status_code == 400 and response.json().get("error", {}).get("type") in["BadRequestError", "invalid_request_error"]:
-                logger.error(f"1Cat-vLLM completions error: {response.json().get('error', {}).get('message', '')}")
+            if response.status_code == 400:
+                logger.error(f"1Cat-vLLM completions error: {response.json()}")
                 return
             else:
                 response.raise_for_status()
@@ -360,7 +395,7 @@ class vLLMServer:
 
                     data = json.loads(line)
                     if data.get("choices"):
-                        content = data["choices"][0].get("text", "")
+                        content = data["choices"][0].get("delta", {}).get("content", "")
                         if content:
                             full_text += content
                             yield full_text
