@@ -578,7 +578,7 @@ class LMDeployModel:
                     quant_policy=quant_policy,
                     cache_max_entry_count=cache_max_entry_count,
                     max_prefill_token_num=256,
-                    enable_prefix_caching=False,
+                    enable_prefix_caching=True,
                 )
 
                 if is_workspace:
@@ -591,7 +591,7 @@ class LMDeployModel:
                         )
                 else:
                     if cpu_realtime:
-                        logger.info("CPU realtime conversion enabled – no VRAM peak during weight export")
+                        logger.info("CPU realtime conversion enabled - no VRAM peak during weight export")
                     load_ctx = _cpu_realtime_conversion() if cpu_realtime else contextlib.nullcontext()
                     with load_ctx:
                         pipeline = Pipeline(
