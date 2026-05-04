@@ -81,6 +81,8 @@ loaders_and_params = OrderedDict({
         'max_batch_size',
         'tensor_parallel',
         'cache_max_entry_count',
+        'cpu_realtime_conversion',
+        'cpu_cast_export',
     ]
 })
 
@@ -337,6 +339,7 @@ def list_model_elements():
         'gpu_split',
         'compute_dtype',
         'quant_type',
+        'cpu_realtime_conversion',
         'load_in_8bit',
         'load_in_4bit',
         'attn_implementation',

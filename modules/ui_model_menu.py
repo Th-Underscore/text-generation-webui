@@ -59,6 +59,7 @@ def create_ui():
                             shared.gradio['load_in_8bit'] = gr.Checkbox(label="load-in-8bit", value=shared.args.load_in_8bit)
                             shared.gradio['load_in_4bit'] = gr.Checkbox(label="load-in-4bit", value=shared.args.load_in_4bit)
                             shared.gradio['use_double_quant'] = gr.Checkbox(label="use_double_quant", value=shared.args.use_double_quant, info='Used by load-in-4bit.')
+                            shared.gradio['tensor_parallel'] = gr.Slider(label="tensor-parallel", minimum=1, maximum=16, step=1, value=shared.args.tensor_parallel, info='Tensor parallelism (TP) degree.')
                             shared.gradio['enable_tp'] = gr.Checkbox(label="enable_tp", value=shared.args.enable_tp, info='Enable tensor parallelism (TP).')
                             shared.gradio['tensorrt_llm_info'] = gr.Markdown(
                                 '* TensorRT-LLM has to be installed manually: `pip install tensorrt_llm==1.1.0 --extra-index-url https://pypi.nvidia.com`.\n\n'
@@ -105,6 +106,7 @@ def create_ui():
                                 shared.gradio['cpu_memory'] = gr.Number(label="Maximum CPU memory in GiB. Use this for CPU offloading.", value=shared.args.cpu_memory)
                                 shared.gradio['compute_dtype'] = gr.Dropdown(label="compute_dtype", choices=["bfloat16", "float16", "float32"], value=shared.args.compute_dtype, info='Used by load-in-4bit.')
                                 shared.gradio['quant_type'] = gr.Dropdown(label="quant_type", choices=["nf4", "fp4"], value=shared.args.quant_type, info='Used by load-in-4bit.')
+                                shared.gradio['cpu_realtime_conversion'] = gr.Checkbox(label="cpu-realtime-conversion", value=shared.args.cpu_realtime_conversion, info='Use CPU realtime conversion (no VRAM peak during weight export).')
 
                             with gr.Column():
                                 shared.gradio['cpu'] = gr.Checkbox(label="cpu", value=shared.args.cpu, info='Use PyTorch in CPU mode.')
@@ -120,7 +122,6 @@ def create_ui():
                                 shared.gradio['no_use_fast'] = gr.Checkbox(label="no_use_fast", value=shared.args.no_use_fast, info='Set use_fast=False while loading the tokenizer.')
                                 shared.gradio['backend'] = gr.Dropdown(label="backend", choices=['turbomind', 'pytorch'], value=shared.args.backend, info='Inference backend: turbomind or pytorch.')
                                 shared.gradio['max_batch_size'] = gr.Slider(label="max-batch-size", minimum=1, maximum=256, step=1, value=shared.args.max_batch_size, info='Maximum batch size.')
-                                shared.gradio['tensor_parallel'] = gr.Slider(label="tensor-parallel", minimum=1, maximum=8, step=1, value=shared.args.tensor_parallel, info='Tensor parallelism degree.')
                                 shared.gradio['cache_max_entry_count'] = gr.Slider(label="cache-max-entry-count", minimum=0.01, maximum=0.9, step=0.01, value=shared.args.cache_max_entry_count, info='Fraction of free GPU memory to allocate for KV cache. 0.05 is a reasonable single-user default for LMDeploy.')
                                 if not shared.args.portable:
                                     with gr.Row():
@@ -142,6 +143,7 @@ def create_ui():
                         shared.gradio['lmdeploy_convert_model'] = gr.Dropdown(label="Source model", choices=utils.get_available_models(), elem_classes='slim-dropdown', interactive=not mu)
                         ui.create_refresh_button(shared.gradio['lmdeploy_convert_model'], lambda: None, lambda: {'choices': utils.get_available_models()}, 'refresh-button', interactive=not mu)
                     shared.gradio['lmdeploy_convert_tp'] = gr.Slider(label="Tensor Parallel", minimum=1, maximum=8, step=1, value=1, info="Number of GPUs for tensor parallelism")
+                    shared.gradio['cpu_cast_export'] = gr.Checkbox(label="cpu-cast-export", value=shared.args.cpu_cast_export, info='Cast tensors to target dtype on CPU before export (saves VRAM during conversion).')
                     with gr.Row():
                         shared.gradio['lmdeploy_convert_button'] = gr.Button("Convert", variant='primary', interactive=not mu)
                     shared.gradio['lmdeploy_convert_status'] = gr.Markdown("")
@@ -212,7 +214,7 @@ def create_event_handlers():
 
     shared.gradio['download_model_button'].click(download_model_wrapper, gradio('custom_model_menu', 'download_specific_file'), gradio('model_status'), show_progress=True)
     shared.gradio['get_file_list'].click(partial(download_model_wrapper, return_links=True), gradio('custom_model_menu', 'download_specific_file'), gradio('model_status'), show_progress=True)
-    shared.gradio['lmdeploy_convert_button'].click(lmdeploy_convert_model, gradio('lmdeploy_convert_model', 'lmdeploy_convert_tp'), gradio('lmdeploy_convert_status'), show_progress=True)
+    shared.gradio['lmdeploy_convert_button'].click(lmdeploy_convert_model, gradio('lmdeploy_convert_model', 'lmdeploy_convert_tp', 'cpu_cast_export'), gradio('lmdeploy_convert_status'), show_progress=True)
     shared.gradio['customized_template_submit'].click(save_instruction_template, gradio('model_menu', 'customized_template'), gradio('model_status'), show_progress=True)
 
 
@@ -252,7 +254,7 @@ def load_lora_wrapper(selected_loras):
     yield ("Successfully applied the LoRAs")
 
 
-def lmdeploy_convert_model(model_name, tp, progress=gr.Progress()):
+def lmdeploy_convert_model(model_name, tp, cpu_cast_export, progress=gr.Progress()):
     if not model_name or model_name == 'None':
         yield "Please select a model to convert."
         return
@@ -305,6 +307,7 @@ def lmdeploy_convert_model(model_name, tp, progress=gr.Progress()):
 
         def do_convert():
             try:
+                shared.args.cpu_cast_export = cpu_cast_export
                 convert_result[0] = convert_model_to_turbomind(str(source_path), str(output_path), model_format, tp)
             except Exception as e:
                 convert_error[0] = e
