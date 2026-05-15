@@ -122,7 +122,7 @@ def create_ui():
                                 shared.gradio['no_use_fast'] = gr.Checkbox(label="no_use_fast", value=shared.args.no_use_fast, info='Set use_fast=False while loading the tokenizer.')
                                 shared.gradio['backend'] = gr.Dropdown(label="backend", choices=['turbomind', 'pytorch'], value=shared.args.backend, info='Inference backend: turbomind or pytorch.')
                                 shared.gradio['max_batch_size'] = gr.Slider(label="max-batch-size", minimum=1, maximum=256, step=1, value=shared.args.max_batch_size, info='Maximum batch size.')
-                                shared.gradio['cache_max_entry_count'] = gr.Slider(label="cache-max-entry-count", minimum=0.01, maximum=0.9, step=0.01, value=shared.args.cache_max_entry_count, info='Fraction of free GPU memory to allocate for KV cache. 0.05 is a reasonable single-user default for LMDeploy.')
+                                shared.gradio['cache_max_entry_count'] = gr.Slider(label="cache-max-entry-count", minimum=0.01, maximum=1.0, step=0.01, value=shared.args.cache_max_entry_count, info='Fraction of free GPU memory to allocate for KV cache. 0.05 is a reasonable single-user default for LMDeploy.')
                                 if not shared.args.portable:
                                     with gr.Row():
                                         shared.gradio['lora_menu'] = gr.Dropdown(multiselect=True, choices=utils.get_available_loras(), value=shared.lora_names, label='LoRA(s)', elem_classes='slim-dropdown', interactive=not mu)
