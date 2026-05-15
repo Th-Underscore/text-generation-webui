@@ -234,6 +234,19 @@ def apply_model_settings_to_state(model, state):
         if k in state and k != 'gpu_layers':  # Skip gpu_layers, handle separately
             state[k] = model_settings[k]
 
+    # Auto-detect a sibling mmproj when the user hasn't saved one for this model.
+    # Bare filenames (from user_data/mmproj/) persist across model switches;
+    # subfolder paths only persist while the new model lives in the same folder.
+    if state.get('loader') == 'llama.cpp' and 'mmproj' not in model_settings:
+        sibling = utils.find_sibling_mmproj(resolve_model_path(model))
+        if sibling:
+            state['mmproj'] = sibling
+        else:
+            current = state.get('mmproj')
+            if current and current != 'None' and ('/' in current or '\\' in current):
+                if Path(current).parent != Path(model).parent:
+                    state['mmproj'] = 'None'
+
     # Handle GPU layers and VRAM update for llama.cpp
     if state['loader'] == 'llama.cpp' and 'gpu_layers' in model_settings:
         gpu_layers = model_settings['gpu_layers']  # -1 (auto) by default, or user-saved value

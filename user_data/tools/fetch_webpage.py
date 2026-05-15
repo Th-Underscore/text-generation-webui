@@ -23,7 +23,7 @@ def execute(arguments):
     if not url:
         return {"error": "No URL provided."}
 
-    content = download_web_page(url, include_links=True)
+    content = download_web_page(url)
     if not content or not content.strip():
         return {"error": f"Failed to fetch content from {url}"}
 

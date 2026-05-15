@@ -221,6 +221,10 @@ class LlamaServer:
             pprint.PrettyPrinter(indent=4, sort_dicts=False).pprint(printable_payload)
             print()
 
+        full_text = ""
+        self.last_completion_probabilities = []
+        self.last_completion_token_count = 0
+
         # Make the generation request
         response = self.session.post(url, json=payload, stream=True)
         try:
@@ -229,9 +233,6 @@ class LlamaServer:
                 return
             else:
                 response.raise_for_status()  # Raise an exception for HTTP errors
-
-            full_text = ""
-            self.last_completion_probabilities = []
 
             # Process the streaming response
             stop_event = state.get('stop_event')
@@ -255,14 +256,16 @@ class LlamaServer:
                     # Extract the token content
                     if data.get('content', ''):
                         full_text += data['content']
+                        self.last_completion_token_count += 1
                         yield full_text
 
                     # Capture logprobs if present
                     if 'completion_probabilities' in data:
                         self.last_completion_probabilities.extend(data['completion_probabilities'])
 
-                    # Check if generation is complete
                     if data.get('stop', False):
+                        # Server count includes speculative-decode tokens our per-chunk counter misses.
+                        self.last_completion_token_count = data.get('tokens_predicted', self.last_completion_token_count)
                         break
 
                 except json.JSONDecodeError as e:
@@ -433,6 +436,9 @@ class LlamaServer:
             "--flash-attn", "on",
         ]
 
+        if shared.args.ctx_size < 0:
+            shared.args.ctx_size = 0
+
         if shared.args.ctx_size > 0:
             cmd += ["--ctx-size", str(shared.args.ctx_size)]
         elif shared.args.gpu_layers >= 0:
@@ -471,7 +477,11 @@ class LlamaServer:
         if shared.args.mmproj not in [None, 'None']:
             path = Path(shared.args.mmproj)
             if not path.exists():
-                path = shared.user_data_dir / 'mmproj' / shared.args.mmproj
+                alt = shared.user_data_dir / 'mmproj' / shared.args.mmproj
+                if alt.exists():
+                    path = alt
+                else:
+                    path = Path(shared.args.model_dir) / shared.args.mmproj
 
             if path.exists():
                 cmd += ["--mmproj", str(path)]
@@ -485,7 +495,7 @@ class LlamaServer:
 
             cmd += ["--model-draft", str(model_file)]
             if shared.args.draft_max > 0:
-                cmd += ["--draft-max", str(shared.args.draft_max)]
+                cmd += ["--spec-draft-n-max", str(shared.args.draft_max)]
             if shared.args.gpu_layers_draft > 0:
                 cmd += ["--gpu-layers-draft", str(shared.args.gpu_layers_draft)]
             if shared.args.device_draft:
@@ -494,11 +504,15 @@ class LlamaServer:
                 cmd += ["--ctx-size-draft", str(shared.args.ctx_size_draft)]
         if shared.args.spec_type != 'none':
             cmd += ["--spec-type", shared.args.spec_type]
-            cmd += ["--draft-max", str(shared.args.draft_max)]
-            cmd += ["--draft-min", "48"]
-            cmd += ["--spec-ngram-size-n", str(shared.args.spec_ngram_size_n)]
-            cmd += ["--spec-ngram-size-m", str(shared.args.spec_ngram_size_m)]
-            cmd += ["--spec-ngram-min-hits", str(shared.args.spec_ngram_min_hits)]
+            if shared.args.spec_type == 'ngram-mod':
+                cmd += ["--spec-ngram-mod-n-match", str(shared.args.spec_ngram_size_n)]
+                cmd += ["--spec-ngram-mod-n-max", str(shared.args.draft_max)]
+                cmd += ["--spec-ngram-mod-n-min", str(shared.args.spec_ngram_size_m)]
+            elif shared.args.spec_type in ('ngram-simple', 'ngram-map-k', 'ngram-map-k4v'):
+                prefix = f"--spec-{shared.args.spec_type}"
+                cmd += [f"{prefix}-size-n", str(shared.args.spec_ngram_size_n)]
+                cmd += [f"{prefix}-size-m", str(shared.args.spec_ngram_size_m)]
+                cmd += [f"{prefix}-min-hits", str(shared.args.spec_ngram_min_hits)]
         cmd += ["--parallel", str(shared.args.parallel)]
         if shared.args.streaming_llm:
             cmd += ["--cache-reuse", "1"]

@@ -23,20 +23,6 @@ For the documentation with all the endpoints, parameters and their types, consul
 
 The official examples in the [OpenAI documentation](https://platform.openai.com/docs/api-reference) should also work, and the same parameters apply (although the API here has more optional parameters).
 
-#### Completions
-
-```shell
-curl http://127.0.0.1:5000/v1/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "prompt": "This is a cake recipe:\n\n1.",
-    "max_tokens": 512,
-    "temperature": 0.6,
-    "top_p": 0.95,
-    "top_k": 20
-  }'
-```
-
 #### Chat completions
 
 Works best with instruction-following models. If the "instruction_template" variable is not provided, it will be detected automatically from the model metadata.
@@ -57,7 +43,21 @@ curl http://127.0.0.1:5000/v1/chat/completions \
   }'
 ```
 
-#### Chat completions with characters
+#### Completions
+
+```shell
+curl http://127.0.0.1:5000/v1/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "This is a cake recipe:\n\n1.",
+    "max_tokens": 512,
+    "temperature": 0.6,
+    "top_p": 0.95,
+    "top_k": 20
+  }'
+```
+
+#### SSE streaming
 
 ```shell
 curl http://127.0.0.1:5000/v1/chat/completions \
@@ -66,15 +66,103 @@ curl http://127.0.0.1:5000/v1/chat/completions \
     "messages": [
       {
         "role": "user",
-        "content": "Hello! Who are you?"
+        "content": "Hello!"
       }
     ],
-    "mode": "chat-instruct",
-    "character": "Example",
     "temperature": 0.6,
     "top_p": 0.95,
-    "top_k": 20
+    "top_k": 20,
+    "stream": true
   }'
+```
+
+#### Tool/Function calling
+
+Use a model with tool calling support (Qwen, Mistral, GPT-OSS, etc). Tools are passed via the `tools` parameter and the prompt is automatically formatted using the model's Jinja2 template.
+
+When the model decides to call a tool, the response will have `finish_reason: "tool_calls"` and a `tool_calls` array with structured function names and arguments. You then execute the tool, send the result back as a `role: "tool"` message, and continue until the model responds with `finish_reason: "stop"`.
+
+Some models call multiple tools in parallel (Qwen, Mistral), while others call one at a time (GPT-OSS). The loop below handles both styles.
+
+```python
+import json
+import requests
+
+url = "http://127.0.0.1:5000/v1/chat/completions"
+
+# Define your tools
+tools = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "Get the current weather for a given location",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "location": {"type": "string", "description": "City name"},
+                },
+                "required": ["location"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_time",
+            "description": "Get the current time in a given timezone",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "timezone": {"type": "string", "description": "IANA timezone string"},
+                },
+                "required": ["timezone"]
+            }
+        }
+    },
+]
+
+
+def execute_tool(name, arguments):
+    """Replace this with your actual tool implementations."""
+    if name == "get_weather":
+        return {"temperature": 22, "condition": "sunny", "humidity": 45}
+    elif name == "get_time":
+        return {"time": "2:30 PM", "timezone": "JST"}
+    return {"error": f"Unknown tool: {name}"}
+
+
+messages = [{"role": "user", "content": "What time is it in Tokyo and what's the weather like there?"}]
+
+# Tool-calling loop: keep going until the model gives a final answer
+for _ in range(10):
+    response = requests.post(url, json={"messages": messages, "tools": tools}).json()
+    choice = response["choices"][0]
+
+    if choice["finish_reason"] == "tool_calls":
+        # Add the assistant's response (with tool_calls) to history
+        messages.append({
+            "role": "assistant",
+            "content": choice["message"]["content"],
+            "tool_calls": choice["message"]["tool_calls"],
+        })
+
+        # Execute each tool and add results to history
+        for tool_call in choice["message"]["tool_calls"]:
+            name = tool_call["function"]["name"]
+            arguments = json.loads(tool_call["function"]["arguments"])
+            result = execute_tool(name, arguments)
+
+            print(f"Tool call: {name}({arguments}) => {result}")
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tool_call["id"],
+                "content": json.dumps(result),
+            })
+    else:
+        # Final answer
+        print(f"\nAssistant: {choice['message']['content']}")
+        break
 ```
 
 #### Multimodal/vision (llama.cpp and ExLlamaV3)
@@ -139,6 +227,58 @@ curl http://127.0.0.1:5000/v1/completions \
 
 For base64-encoded images, just replace the inner "url" values with this format: `data:image/FORMAT;base64,BASE64_STRING` where FORMAT is the file type (png, jpeg, gif, etc.) and BASE64_STRING is your base64-encoded image data.
 
+#### List models
+
+```shell
+curl -k http://127.0.0.1:5000/v1/internal/model/list \
+  -H "Content-Type: application/json"
+```
+
+#### Load model
+
+```shell
+curl -k http://127.0.0.1:5000/v1/internal/model/load \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model_name": "Qwen_Qwen3-0.6B-Q4_K_M.gguf",
+    "args": {
+      "ctx_size": 32768,
+      "cache_type": "q8_0"
+    }
+  }'
+```
+
+You can also set a default instruction template for all subsequent API requests by passing `instruction_template` (a template name from `user_data/instruction-templates/`) or `instruction_template_str` (a raw Jinja2 string):
+
+```shell
+curl -k http://127.0.0.1:5000/v1/internal/model/load \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model_name": "Qwen_Qwen3-0.6B-Q4_K_M.gguf",
+    "instruction_template": "Alpaca"
+  }'
+```
+
+#### Chat completions with characters
+
+```shell
+curl http://127.0.0.1:5000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages": [
+      {
+        "role": "user",
+        "content": "Hello! Who are you?"
+      }
+    ],
+    "mode": "chat-instruct",
+    "character": "Example",
+    "temperature": 0.6,
+    "top_p": 0.95,
+    "top_k": 20
+  }'
+```
+
 #### Image generation
 
 ```shell
@@ -168,25 +308,6 @@ The output is a JSON object containing a `data` array. Each element has a `b64_j
 }
 ```
 
-#### SSE streaming
-
-```shell
-curl http://127.0.0.1:5000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "messages": [
-      {
-        "role": "user",
-        "content": "Hello!"
-      }
-    ],
-    "temperature": 0.6,
-    "top_p": 0.95,
-    "top_k": 20,
-    "stream": true
-  }'
-```
-
 #### Logits
 
 ```shell
@@ -207,39 +328,6 @@ curl -k http://127.0.0.1:5000/v1/internal/logits \
     "prompt": "Who is best, Asuka or Rei? Answer:",
     "use_samplers": true,
     "top_k": 3
-  }'
-```
-
-#### List models
-
-```shell
-curl -k http://127.0.0.1:5000/v1/internal/model/list \
-  -H "Content-Type: application/json"
-```
-
-#### Load model
-
-```shell
-curl -k http://127.0.0.1:5000/v1/internal/model/load \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model_name": "Qwen_Qwen3-0.6B-Q4_K_M.gguf",
-    "args": {
-      "ctx_size": 32768,
-      "flash_attn": true,
-      "cache_type": "q8_0"
-    }
-  }'
-```
-
-You can also set a default instruction template for all subsequent API requests by passing `instruction_template` (a template name from `user_data/instruction-templates/`) or `instruction_template_str` (a raw Jinja2 string):
-
-```shell
-curl -k http://127.0.0.1:5000/v1/internal/model/load \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model_name": "Qwen_Qwen3-0.6B-Q4_K_M.gguf",
-    "instruction_template": "Alpaca"
   }'
 ```
 
@@ -349,6 +437,27 @@ for event in client.events():
 print()
 ```
 
+#### Python example with API key
+
+Replace
+
+```python
+headers = {
+    "Content-Type": "application/json"
+}
+```
+
+with
+
+```python
+headers = {
+    "Content-Type": "application/json",
+    "Authorization": "Bearer yourPassword123"
+}
+```
+
+in any of the examples above.
+
 #### Python parallel requests example
 
 The API supports handling multiple requests in parallel. For ExLlamaV3, this works out of the box. For llama.cpp, you need to pass `--parallel N` to set the number of concurrent slots.
@@ -376,116 +485,6 @@ with concurrent.futures.ThreadPoolExecutor() as executor:
 
 for prompt, result in zip(prompts, results):
     print(f"Q: {prompt}\nA: {result}\n")
-```
-
-#### Python example with API key
-
-Replace
-
-```python
-headers = {
-    "Content-Type": "application/json"
-}
-```
-
-with
-
-```python
-headers = {
-    "Content-Type": "application/json",
-    "Authorization": "Bearer yourPassword123"
-}
-```
-
-in any of the examples above.
-
-#### Tool/Function calling
-
-Use a model with tool calling support (Qwen, Mistral, GPT-OSS, etc). Tools are passed via the `tools` parameter and the prompt is automatically formatted using the model's Jinja2 template.
-
-When the model decides to call a tool, the response will have `finish_reason: "tool_calls"` and a `tool_calls` array with structured function names and arguments. You then execute the tool, send the result back as a `role: "tool"` message, and continue until the model responds with `finish_reason: "stop"`.
-
-Some models call multiple tools in parallel (Qwen, Mistral), while others call one at a time (GPT-OSS). The loop below handles both styles.
-
-```python
-import json
-import requests
-
-url = "http://127.0.0.1:5000/v1/chat/completions"
-
-# Define your tools
-tools = [
-    {
-        "type": "function",
-        "function": {
-            "name": "get_weather",
-            "description": "Get the current weather for a given location",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "location": {"type": "string", "description": "City name"},
-                },
-                "required": ["location"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_time",
-            "description": "Get the current time in a given timezone",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "timezone": {"type": "string", "description": "IANA timezone string"},
-                },
-                "required": ["timezone"]
-            }
-        }
-    },
-]
-
-
-def execute_tool(name, arguments):
-    """Replace this with your actual tool implementations."""
-    if name == "get_weather":
-        return {"temperature": 22, "condition": "sunny", "humidity": 45}
-    elif name == "get_time":
-        return {"time": "2:30 PM", "timezone": "JST"}
-    return {"error": f"Unknown tool: {name}"}
-
-
-messages = [{"role": "user", "content": "What time is it in Tokyo and what's the weather like there?"}]
-
-# Tool-calling loop: keep going until the model gives a final answer
-for _ in range(10):
-    response = requests.post(url, json={"messages": messages, "tools": tools}).json()
-    choice = response["choices"][0]
-
-    if choice["finish_reason"] == "tool_calls":
-        # Add the assistant's response (with tool_calls) to history
-        messages.append({
-            "role": "assistant",
-            "content": choice["message"]["content"],
-            "tool_calls": choice["message"]["tool_calls"],
-        })
-
-        # Execute each tool and add results to history
-        for tool_call in choice["message"]["tool_calls"]:
-            name = tool_call["function"]["name"]
-            arguments = json.loads(tool_call["function"]["arguments"])
-            result = execute_tool(name, arguments)
-
-            print(f"Tool call: {name}({arguments}) => {result}")
-            messages.append({
-                "role": "tool",
-                "tool_call_id": tool_call["id"],
-                "content": json.dumps(result),
-            })
-    else:
-        # Final answer
-        print(f"\nAssistant: {choice['message']['content']}")
-        break
 ```
 
 ### Environment variables

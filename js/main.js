@@ -134,20 +134,14 @@ document.addEventListener("keydown", function(event) {
 });
 
 //------------------------------------------------
-// Position the chat typing dots
-//------------------------------------------------
-typing = document.getElementById("typing-container");
-typingParent = typing.parentNode;
-typingSibling = typing.previousElementSibling;
-typingSibling.insertBefore(typing, typingSibling.childNodes[2]);
-
-//------------------------------------------------
 // Chat scrolling
 //------------------------------------------------
 const targetElement = document.getElementById("chat").parentNode.parentNode.parentNode;
 targetElement.classList.add("pretty_scrollbar");
 targetElement.classList.add("chat-parent");
 window.isScrolled = false;
+window.pendingGenerationStart = false;
+window.smoothScrollUntilTs = 0;
 let scrollTimeout;
 let lastScrollTop = 0;
 let lastScrollHeight = 0;
@@ -181,9 +175,9 @@ targetElement.addEventListener("scroll", function() {
 // Create a MutationObserver instance
 const observer = new MutationObserver(function() {
   if (targetElement.classList.contains("_generating")) {
-    typing.parentNode.classList.add("visible-dots");
     document.getElementById("stop").style.display = "flex";
     document.getElementById("Generate").style.display = "none";
+    window.pendingGenerationStart = true;
     // If the user is near the bottom, ensure auto-scroll is enabled
     // for the new reply. This catches cases where isScrolled was
     // incorrectly set to true by layout shifts during page load, etc.
@@ -192,7 +186,6 @@ const observer = new MutationObserver(function() {
       window.isScrolled = false;
     }
   } else {
-    typing.parentNode.classList.remove("visible-dots");
     document.getElementById("stop").style.display = "none";
     document.getElementById("Generate").style.display = "flex";
   }
@@ -542,6 +535,12 @@ let originalIndex; // To keep track of the original position
 let movedElement;
 
 function moveToChatTab() {
+  // On first call, wait until mode is initialized so the visibility check below sees the real state
+  if (!originalParent && !document.querySelector("#chat-mode input:checked")) {
+    requestAnimationFrame(moveToChatTab);
+    return;
+  }
+
   const characterMenu = document.getElementById("character-menu");
   const grandParent = characterMenu.parentElement.parentElement;
 
@@ -558,15 +557,19 @@ function moveToChatTab() {
     grandParent.style.display = "none";
   }
 
-  grandParent.children[0].style.minWidth = "100%";
+  grandParent.children[0].style.flex = "1";
+  grandParent.children[0].style.minWidth = "0";
 
   const chatControlsFirstChild = document.querySelector("#chat-controls").firstElementChild;
   const newParent = chatControlsFirstChild;
-  let newPosition = newParent.children.length - 3;
+  let newPosition = 1;
 
   newParent.insertBefore(grandParent, newParent.children[newPosition]);
   document.getElementById("save-character").style.display = "none";
   document.getElementById("restore-character").style.display = "none";
+
+  const characterInfo = document.querySelector("#character-menu [data-testid='block-info']")?.nextElementSibling;
+  if (characterInfo) characterInfo.style.display = "none";
 }
 
 function restoreOriginalPosition() {
@@ -580,7 +583,11 @@ function restoreOriginalPosition() {
     document.getElementById("save-character").style.display = "";
     document.getElementById("restore-character").style.display = "";
     movedElement.style.display = "";
+    movedElement.children[0].style.flex = "";
     movedElement.children[0].style.minWidth = "";
+
+    const characterInfo = document.querySelector("#character-menu [data-testid='block-info']")?.nextElementSibling;
+    if (characterInfo) characterInfo.style.display = "";
   }
 }
 
@@ -972,24 +979,18 @@ document.fonts.addEventListener("loadingdone", (event) => {
 (function() {
   const chatParent = document.querySelector(".chat-parent");
   const chatInputRow = document.querySelector("#chat-input-row");
-  const originalMarginBottom = 75;
-  let originalHeight = chatInputRow.offsetHeight;
+  if (!chatParent || !chatInputRow) return;
 
-  function updateMargin() {
-    const currentHeight = chatInputRow.offsetHeight;
-    const heightDifference = currentHeight - originalHeight;
-    chatParent.style.marginBottom = `${originalMarginBottom + heightDifference}px`;
+  // Keep chat-parent's box ending 15px above the (absolute)
+  // composer so the message-actions row isn't glued to it.
+  function syncMargin() {
+    chatParent.style.marginBottom = (chatInputRow.offsetHeight + 15) + "px";
     if (!window.isScrolled) {
       chatParent.scrollTop = chatParent.scrollHeight - chatParent.clientHeight;
     }
   }
 
-  // Watch for size changes that affect height
-  new ResizeObserver(updateMargin).observe(chatInputRow);
-
-  // Also listen for window resize
-  window.addEventListener("resize", updateMargin);
-
-  // Initial call to set the margin based on current state
-  updateMargin();
+  new ResizeObserver(syncMargin).observe(chatInputRow);
+  window.addEventListener("resize", syncMargin);
+  syncMargin();
 })();

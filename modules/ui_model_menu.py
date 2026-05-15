@@ -71,7 +71,7 @@ def create_ui():
                             # Multimodal
                             with gr.Accordion("Multimodal (vision)", open=False) as shared.gradio['mmproj_accordion']:
                                 with gr.Row():
-                                    shared.gradio['mmproj'] = gr.Dropdown(label="mmproj file", choices=utils.get_available_mmproj(), value=lambda: shared.args.mmproj or 'None', elem_classes='slim-dropdown', info=f'Select a file that matches your model. Must be placed in {shared.user_data_dir}/mmproj/', interactive=not mu)
+                                    shared.gradio['mmproj'] = gr.Dropdown(label="mmproj file", choices=utils.get_available_mmproj(), value=lambda: shared.args.mmproj or 'None', elem_classes='slim-dropdown', info=f'Select a file that matches your model. Lists files placed in {shared.user_data_dir}/mmproj/, plus any mmproj-*.gguf files found in your main models folder.', interactive=not mu)
                                     ui.create_refresh_button(shared.gradio['mmproj'], lambda: None, lambda: {'choices': utils.get_available_mmproj()}, 'refresh-button', interactive=not mu)
 
                             # Speculative decoding
@@ -509,7 +509,10 @@ def update_truncation_length(current_length, state):
                 return state['ctx_size']
 
             # ctx_size == 0 means auto: use the actual value from the server
-            return shared.settings['truncation_length']
+            new_length = state['ctx_size'] if state['ctx_size'] > 0 else shared.settings['truncation_length']
+            if not shared.args.multi_user:
+                shared.persistent_interface_state['truncation_length'] = new_length
+            return new_length
 
     return current_length
 
@@ -541,17 +544,19 @@ def handle_load_model_event_initial(model, state):
     update_model_parameters(state)  # This updates the command-line flags
 
     show_separator, _, _, _ = utils.get_jinja_control_visibility(state.get('instruction_template_str', ''))
+    not_chat = state.get('mode') != 'chat'
 
     vram_info = state.get('vram_info', "<div id=\"vram-info\"'>Estimated VRAM to load the model:</div>")
-    return output + [state] + [vram_info] + [gr.update(visible=show_separator)]
+    return output + [state] + [vram_info] + [gr.update(visible=show_separator and not_chat)]
 
 
 def handle_load_model_event_final(truncation_length, loader, state):
     truncation_length = update_truncation_length(truncation_length, state)
 
     show_separator, show_reasoning, show_thinking, show_preserve_thinking = utils.get_jinja_control_visibility(state.get('instruction_template_str', ''))
+    not_chat = state.get('mode') != 'chat'
 
-    return [truncation_length, loader, gr.update(visible=show_separator), gr.update(visible=show_reasoning), gr.update(visible=show_thinking), gr.update(visible=show_preserve_thinking)]
+    return [truncation_length, loader, gr.update(visible=show_separator and not_chat), gr.update(visible=show_reasoning and not_chat), gr.update(visible=show_thinking and not_chat), gr.update(visible=show_preserve_thinking and not_chat)]
 
 
 def handle_unload_model_click():

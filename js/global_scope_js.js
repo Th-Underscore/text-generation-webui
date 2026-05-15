@@ -3,6 +3,8 @@
 // -------------------------------------------------
 
 function getProfilePictureUrl() {
+  const thumb = document.querySelector(".pfp_character");
+  if (thumb) return thumb.src.replace("pfp_character_thumb.png", "pfp_character.png");
   return "/file/user_data/cache/pfp_character.png?time=" + Date.now();
 }
 
@@ -271,6 +273,7 @@ function removeLastClick() {
 }
 
 let _scrollPending = false;
+const SMOOTH_SCROLL_WINDOW_MS = 700;
 
 function autoScrollToBottom() {
   if (_scrollPending) return;
@@ -282,7 +285,11 @@ function autoScrollToBottom() {
       if (chatParent) {
         const maxScroll = chatParent.scrollHeight - chatParent.clientHeight;
         if (maxScroll > 0 && chatParent.scrollTop < maxScroll - 1) {
-          chatParent.scrollTop = maxScroll;
+          if (Date.now() < window.smoothScrollUntilTs) {
+            chatParent.scrollTo({ top: maxScroll, behavior: "smooth" });
+          } else {
+            chatParent.scrollTop = maxScroll;
+          }
         }
       }
     }
@@ -296,7 +303,7 @@ function updateInstructPadding() {
     const lastChild = messagesContainer?.lastElementChild;
     const prevSibling = lastChild?.previousElementSibling;
     if (lastChild && prevSibling && chatElement.offsetHeight > 0) {
-      let bufferHeight = Math.max(0, Math.max(window.innerHeight - 128 - 84, window.innerHeight - prevSibling.offsetHeight - 84) - lastChild.offsetHeight);
+      let bufferHeight = Math.max(0, Math.max(window.innerHeight - 128 - 119, window.innerHeight - prevSibling.offsetHeight - 119) - lastChild.offsetHeight);
       if (window.innerWidth <= 924) {
         bufferHeight = Math.max(0, bufferHeight - 32);
       }
@@ -333,12 +340,17 @@ function applyMorphdomUpdate(data) {
 
   const queryScope = target_element;
 
-  // Track open blocks and store their scroll positions
+  const messagesContainer = document.getElementsByClassName("messages")[0];
+  const messagesCountBefore = messagesContainer ? messagesContainer.children.length : 0;
+
+  // Track open/closed blocks and store scroll positions for open ones
   const openBlocks = new Set();
+  const closedBlocks = new Set();
   const scrollPositions = {};
   queryScope.querySelectorAll(".thinking-block").forEach(block => {
     const blockId = block.getAttribute("data-block-id");
-    if (blockId && block.hasAttribute("open") && !block.querySelector(".tool-approval-buttons")) {
+    if (!blockId || block.querySelector(".tool-approval-buttons")) return;
+    if (block.hasAttribute("open")) {
       openBlocks.add(blockId);
       const content = block.querySelector(".thinking-content");
       if (content) {
@@ -348,6 +360,8 @@ function applyMorphdomUpdate(data) {
           isAtBottom: isAtBottom
         };
       }
+    } else {
+      closedBlocks.add(blockId);
     }
   });
 
@@ -368,13 +382,16 @@ function applyMorphdomUpdate(data) {
           }
         }
 
-        // For thinking blocks, preserve user-opened state and
-        // server-requested open (e.g. tool approval); otherwise close.
+        // For thinking blocks that already exist in the DOM, preserve the
+        // user's toggle state across streaming updates (in either direction).
+        // New blocks fall through to the server-rendered open/closed state.
         if (fromEl.classList && fromEl.classList.contains("thinking-block") &&
            toEl.classList && toEl.classList.contains("thinking-block")) {
           const blockId = toEl.getAttribute("data-block-id");
           if (blockId && openBlocks.has(blockId)) {
             toEl.setAttribute("open", "");
+          } else if (blockId && closedBlocks.has(blockId)) {
+            toEl.removeAttribute("open");
           }
         }
 
@@ -404,6 +421,15 @@ function applyMorphdomUpdate(data) {
   // Syntax highlighting and LaTeX
   if (window.doSyntaxHighlighting) {
     window.doSyntaxHighlighting();
+  }
+
+  // Only animate the padding jump on a fresh submission, not on chat switches or streaming chunks.
+  if (window.pendingGenerationStart) {
+    const messagesCountAfter = messagesContainer ? messagesContainer.children.length : 0;
+    if (messagesCountAfter > messagesCountBefore) {
+      window.smoothScrollUntilTs = Date.now() + SMOOTH_SCROLL_WINDOW_MS;
+    }
+    window.pendingGenerationStart = false;
   }
 
   // Auto-scroll runs both before and after padding update.

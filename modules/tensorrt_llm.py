@@ -26,9 +26,12 @@ class TensorRTLLMModel:
         return result
 
     def generate_with_streaming(self, prompt, state):
+        self.last_prompt_token_count = len(shared.tokenizer.encode(prompt))
+        self.last_completion_token_count = 0
+
         sampling_params = SamplingParams(
             max_tokens=state['max_new_tokens'] if not state['auto_max_new_tokens']
-                       else state['truncation_length'] - len(shared.tokenizer.encode(prompt)),
+                       else state['truncation_length'] - self.last_prompt_token_count,
             end_id=shared.tokenizer.eos_token_id,
             temperature=state['temperature'],
             top_k=state['top_k'],
@@ -53,6 +56,7 @@ class TensorRTLLMModel:
                 result.abort()
                 break
 
+            self.last_completion_token_count = len(output.outputs[0].token_ids)
             text_diff = output.outputs[0].text_diff
             if text_diff:
                 cumulative_reply += text_diff

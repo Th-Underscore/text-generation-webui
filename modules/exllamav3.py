@@ -428,6 +428,7 @@ class Exllamav3Model:
         response_text = ""
         stop_event = state.get('stop_event')
         self.last_completion_probabilities = []
+        self.last_completion_token_count = 0
 
         result_queue = self.parallel_generator.submit(job)
         try:
@@ -445,6 +446,10 @@ class Exllamav3Model:
                 chunk = result.get("text", "")
                 if return_top_tokens > 0:
                     self._capture_logprobs(result)
+
+                step_tokens = result.get("token_ids")
+                if step_tokens is not None:
+                    self.last_completion_token_count += len(step_tokens)
 
                 if chunk:
                     response_text += chunk

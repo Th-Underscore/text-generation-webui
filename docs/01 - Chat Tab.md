@@ -13,8 +13,8 @@ The hover menu (☰) that appears over the chat area contains:
 * **Continue**: makes the model attempt to continue the existing reply. In some cases, the model may simply end the existing turn immediately without generating anything new, but in other cases, it may generate a longer reply.
 * **Remove last reply**: removes the last input/output pair from the history and sends your last message back into the input field.
 * **Impersonate**: makes the model generate a new message on your behalf in the input field, taking into consideration the existing chat history.
-* **Send dummy message**: adds a new message to the chat history without causing the model to generate a reply.
-* **Send dummy reply**: adds a new reply to the chat history as if the model had generated this reply. Useful in conjunction with "Send dummy message".
+* **Insert user message**: adds a new user message to the chat history without causing the model to generate a reply.
+* **Insert assistant message**: adds a new assistant message to the chat history as if the model had generated it. Useful in conjunction with "Insert user message".
 * **Send to Notebook**: sends the entire chat prompt up to now to the Notebook tab.
 * **Show controls**: checkbox that toggles the visibility of the sidebar controls (Start reply with, Mode, Chat style, etc.). Shortcut: Ctrl+S.
 

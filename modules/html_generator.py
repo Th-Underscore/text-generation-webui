@@ -1,6 +1,7 @@
 import datetime
 import functools
 import html
+import json
 import os
 import re
 import time
@@ -125,17 +126,44 @@ def extract_thinking_block(string):
 TOOL_APPROVAL_PENDING = '\x00approval_pending'
 
 
+def _render_web_search_body(body):
+    """Render a web_search tool result body as structured cards. Returns None
+    if the body doesn't look like a valid web_search result list."""
+    try:
+        results = json.loads(body)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(results, list) or not results:
+        return None
+    if not all(isinstance(r, dict) and 'title' in r and 'url' in r for r in results):
+        return None
+
+    cards = []
+    for r in results:
+        title = html.escape(r['title'])
+        url = html.escape(r['url'])
+        snippet = html.escape(r.get('snippet', ''))
+        cards.append(
+            f'<div class="web-search-result">'
+            f'<a class="web-search-title" href="{url}" target="_blank" rel="noopener noreferrer">{title}</a>'
+            f'<div class="web-search-snippet">{snippet}</div>'
+            f'</div>'
+        )
+    return ''.join(cards)
+
+
 def build_tool_call_block(header, body, message_id, index):
     """Build HTML for a tool call accordion block."""
     block_id = f"tool-call-{message_id}-{index}"
 
     if body == '...':
-        # Pending placeholder — no expandable body, just title with ellipsis
+        # Pending placeholder — tool call is in flight, body filled in later
         return f'''
         <details class="thinking-block" data-block-id="{block_id}">
             <summary class="thinking-header">
                 {tool_svg_small}
-                <span class="thinking-title">{html.escape(header)} ...</span>
+                <span class="thinking-title">{html.escape(header)}</span>
+                <span class="tool-call-spinner"></span>
             </summary>
         </details>
         '''
@@ -154,6 +182,19 @@ def build_tool_call_block(header, body, message_id, index):
             </div>
         </details>
         '''
+
+    if header.startswith('web_search('):
+        rendered = _render_web_search_body(body)
+        if rendered is not None:
+            return f'''
+            <details class="thinking-block" open data-block-id="{block_id}">
+                <summary class="thinking-header">
+                    {tool_svg_small}
+                    <span class="thinking-title">{html.escape(header)}</span>
+                </summary>
+                <div class="thinking-content pretty_scrollbar web-search-results">{rendered}</div>
+            </details>
+            '''
 
     # Build a plain <pre> directly to avoid highlight.js auto-detection
     escaped_body = html.escape(body)

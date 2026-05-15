@@ -50,9 +50,21 @@ _history_file_lock = threading.Lock()
 _tool_approvals = {}
 _tool_approvals_lock = threading.Lock()
 
+# Currently-viewed chat id (single-user mode only). Used to skip streaming UI
+# updates when the user switches to a different chat mid-stream.
+viewing_unique_id = None
+
+
+def set_viewing_unique_id(unique_id):
+    global viewing_unique_id
+    if not shared.args.multi_user:
+        viewing_unique_id = unique_id
+
 
 def request_tool_approval(session_key, tool_name):
-    """Block until the user approves/rejects a tool call. Returns 'approve'|'always'|'reject'."""
+    """Block until the user approves/rejects a tool call.
+    Returns 'approve'|'always'|'reject', or None if generation was stopped
+    before the user made a decision."""
     with _tool_approvals_lock:
         if session_key not in _tool_approvals:
             _tool_approvals[session_key] = {
@@ -68,7 +80,7 @@ def request_tool_approval(session_key, tool_name):
     while not session["event"].wait(timeout=0.5):
         if shared.stop_everything:
             session["tool_name"] = None
-            return 'reject'
+            return None
     session["tool_name"] = None
     return session["result"]
 
@@ -733,6 +745,26 @@ def count_prompt_tokens(text_input, state):
         return f"Error: {str(e)}"
 
 
+def update_token_display_from_state(state):
+    import gradio as gr
+    if shared.model is None:
+        return gr.update()
+
+    prompt_n = getattr(shared.model, 'last_prompt_token_count', None)
+    if not prompt_n:
+        return gr.update()
+
+    gen_n = getattr(shared.model, 'last_completion_token_count', 0) or 0
+    total = prompt_n + gen_n
+    max_tokens = state.get('truncation_length') or 0
+    percentage = (total / max_tokens) * 100 if max_tokens > 0 else 0
+    new_value = f"{total:,} / {max_tokens:,} tokens ({percentage:.1f}%)"
+    if new_value == getattr(shared.model, '_last_token_display', None):
+        return gr.update()
+    shared.model._last_token_display = new_value
+    return new_value
+
+
 def get_stopping_strings(state):
     renderers = []
 
@@ -1302,6 +1334,13 @@ def character_is_loaded(state, raise_exception=False):
         return True
 
 
+def check_model_loaded_or_raise():
+    model_is_loaded, error_message = utils.check_model_loaded()
+    if not model_is_loaded:
+        import gradio as gr
+        raise gr.Error(error_message)
+
+
 def generate_chat_reply_wrapper(text, state, regenerate=False, _continue=False):
     '''
     Same as above but returns HTML for the UI.
@@ -1311,13 +1350,12 @@ def generate_chat_reply_wrapper(text, state, regenerate=False, _continue=False):
     using metadata['assistant_N']['tool_sequence'].
     '''
 
+    set_viewing_unique_id(state['unique_id'])
+
     if not character_is_loaded(state):
         return
 
-    model_is_loaded, error_message = utils.check_model_loaded()
-    if not model_is_loaded:
-        import gradio as gr
-        raise gr.Error(error_message)
+    check_model_loaded_or_raise()
 
     if state['start_with'] != '' and not _continue:
         if regenerate:
@@ -1395,7 +1433,8 @@ def generate_chat_reply_wrapper(text, state, regenerate=False, _continue=False):
             if visible_prefix:
                 history['visible'][-1][1] = '\n\n'.join(visible_prefix + [_original_visible])
 
-            yield chat_html_wrapper(history, state['name1'], state['name2'], state['mode'], state['chat_style'], state['character_menu'], last_message_only=(i > 0)), history
+            if shared.args.multi_user or viewing_unique_id is None or viewing_unique_id == state['unique_id']:
+                yield chat_html_wrapper(history, state['name1'], state['name2'], state['mode'], state['chat_style'], state['character_menu'], last_message_only=(i > 0)), history
 
             if visible_prefix:
                 history['visible'][-1][1] = _original_visible
@@ -1543,7 +1582,7 @@ def generate_chat_reply_wrapper(text, state, regenerate=False, _continue=False):
 
                 approval = request_tool_approval(_session_key, fn_name)
 
-                if approval == 'reject' and shared.stop_everything:
+                if approval is None:
                     _cancel_remaining(i)
                     yield _render(), history
                     break
@@ -1574,6 +1613,11 @@ def generate_chat_reply_wrapper(text, state, regenerate=False, _continue=False):
         save_history(history, state['unique_id'], state['character_menu'], state['mode'])
 
         state['history'] = history
+
+        # Honor stop here; text_generation resets the flag on re-entry.
+        if shared.stop_everything:
+            break
+
         _tool_turn += 1
 
     state.pop('_tool_turn', None)
@@ -1610,6 +1654,9 @@ def generate_chat_reply_wrapper(text, state, regenerate=False, _continue=False):
                 meta_entry['versions'][current_idx].update(version_update)
 
     save_history(history, state['unique_id'], state['character_menu'], state['mode'])
+
+    if viewing_unique_id == state['unique_id']:
+        set_viewing_unique_id(None)
 
 
 def remove_last_message(history):
@@ -2416,6 +2463,8 @@ def handle_remove_last_click(state):
 
 
 def handle_unique_id_select(state):
+    set_viewing_unique_id(state['unique_id'])
+
     history = load_history(state['unique_id'], state['character_menu'], state['mode'])
     html = redraw_html(history, state['name1'], state['name2'], state['mode'], state['chat_style'], state['character_menu'])
 
@@ -2437,6 +2486,7 @@ def handle_start_new_chat_click(state):
 
     if len(histories) > 0:
         past_chats_update = gr.update(choices=histories, value=histories[0][1])
+        set_viewing_unique_id(histories[0][1])
     else:
         past_chats_update = gr.update(choices=histories)
 
@@ -2453,6 +2503,7 @@ def handle_start_incognito_chat_click(state):
 
     histories = find_all_histories_with_first_prompts(state)
     past_chats_update = gr.update(choices=histories, value=unique_id)
+    set_viewing_unique_id(unique_id)
 
     return [history, html, past_chats_update]
 
@@ -2472,6 +2523,8 @@ def handle_delete_chat_confirm_click(state):
     html = redraw_html(history, state['name1'], state['name2'], state['mode'], state['chat_style'], state['character_menu'])
 
     convert_to_markdown.cache_clear()
+
+    set_viewing_unique_id(unique_id)
 
     return [history, html, unique_id]
 
@@ -2499,6 +2552,7 @@ def handle_branch_chat_click(state):
     convert_to_markdown.cache_clear()
 
     past_chats_update = gr.update(choices=histories, value=new_unique_id)
+    set_viewing_unique_id(new_unique_id)
 
     return [history, html, past_chats_update, -1]
 
@@ -2647,6 +2701,7 @@ def handle_upload_chat_history(load_chat_history, state):
 
     if len(histories) > 0:
         past_chats_update = gr.update(choices=histories, value=histories[0][1])
+        set_viewing_unique_id(histories[0][1])
     else:
         past_chats_update = gr.update(choices=histories)
 
@@ -2674,7 +2729,9 @@ def handle_character_menu_change(state):
     convert_to_markdown.cache_clear()
 
     if len(histories) > 0:
-        past_chats_update = gr.update(choices=histories, value=loaded_unique_id or histories[0][1])
+        new_id = loaded_unique_id or histories[0][1]
+        past_chats_update = gr.update(choices=histories, value=new_id)
+        set_viewing_unique_id(new_id)
     else:
         past_chats_update = gr.update(choices=histories)
 
@@ -2722,15 +2779,28 @@ def handle_mode_change(state):
     convert_to_markdown.cache_clear()
 
     if len(histories) > 0:
-        past_chats_update = gr.update(choices=histories, value=loaded_unique_id or histories[0][1])
+        new_id = loaded_unique_id or histories[0][1]
+        past_chats_update = gr.update(choices=histories, value=new_id)
+        set_viewing_unique_id(new_id)
     else:
         past_chats_update = gr.update(choices=histories)
+
+    show_separator, show_reasoning, show_thinking, show_preserve_thinking = utils.get_jinja_control_visibility(state.get('instruction_template_str', ''))
+    not_chat = state['mode'] != 'chat'
 
     return [
         history,
         html,
         gr.update(visible=state['mode'] != 'instruct'),
         gr.update(visible=state['mode'] == 'chat-instruct'),
+        gr.update(visible=not_chat),
+        gr.update(visible=show_reasoning and not_chat),
+        gr.update(visible=show_thinking and not_chat),
+        gr.update(visible=show_preserve_thinking and not_chat),
+        gr.update(visible=show_separator and not_chat),
+        gr.update(visible=not_chat),
+        gr.update(visible=not_chat),
+        gr.update(visible=not_chat),
         past_chats_update
     ]
 

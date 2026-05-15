@@ -405,6 +405,8 @@ def generate_reply_HF(question, original_question, state, stopping_strings=None,
     # Encode the input
     input_ids = encode(question, add_bos_token=state['add_bos_token'], truncation_length=get_max_prompt_length(state))
     output = input_ids[0]
+    shared.model.last_prompt_token_count = input_ids.shape[-1]
+    shared.model.last_completion_token_count = 0
     if state['auto_max_new_tokens']:
         generate_params['max_new_tokens'] = state['truncation_length'] - input_ids.shape[-1]
 
@@ -474,7 +476,8 @@ def generate_reply_HF(question, original_question, state, stopping_strings=None,
 
             with generate_with_streaming(**generate_params) as generator:
                 cumulative_reply = ''
-                starting_from = 0 if shared.is_seq2seq else len(input_ids[0])
+                prompt_len = 0 if shared.is_seq2seq else len(input_ids[0])
+                starting_from = prompt_len
                 for output in generator:
                     if output[-1] in eos_token_ids:
                         break
@@ -485,6 +488,7 @@ def generate_reply_HF(question, original_question, state, stopping_strings=None,
                         continue
 
                     cumulative_reply += new_content
+                    shared.model.last_completion_token_count = len(output) - prompt_len
                     starting_from = len(output)
                     yield cumulative_reply
 

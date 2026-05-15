@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import gradio as gr
 
 from modules import shared, ui, utils
@@ -11,6 +13,10 @@ def create_ui():
             with gr.Column():
                 gr.Markdown("## Settings")
                 shared.gradio['toggle_dark_mode'] = gr.Button('Toggle light/dark theme 💡', elem_classes='refresh-button')
+                if shared.is_electron:
+                    with gr.Row():
+                        shared.gradio['model_dir'] = gr.Textbox(label='Models directory', value=shared.settings['model_dir'], scale=4, elem_classes='slim-textbox')
+                        shared.gradio['model_dir_browse'] = gr.Button('Browse', elem_classes=['refresh-button', 'refresh-button-medium'])
                 shared.gradio['show_two_notebook_columns'] = gr.Checkbox(label='Show two columns in the Notebook tab', value=shared.settings['show_two_notebook_columns'])
                 shared.gradio['paste_to_attachment'] = gr.Checkbox(label='Turn long pasted text into attachments in the Chat tab', value=shared.settings['paste_to_attachment'], elem_id='paste_to_attachment')
                 shared.gradio['include_past_attachments'] = gr.Checkbox(label='Include attachments/search results from previous messages in the chat prompt', value=shared.settings['include_past_attachments'])
@@ -35,6 +41,13 @@ def create_ui():
         shared.gradio['toggle_dark_mode'].click(
             lambda x: 'dark' if x == 'light' else 'light', gradio('theme_state'), gradio('theme_state')).then(
             None, None, None, js=f'() => {{{ui.dark_theme_js}; toggleDarkMode(); localStorage.setItem("theme", document.body.classList.contains("dark") ? "dark" : "light")}}')
+
+        if shared.is_electron:
+            shared.gradio['model_dir_browse'].click(
+                None, gradio('model_dir'), gradio('model_dir'),
+                js='async (current) => { const p = await window.electronAPI.pickDirectory(); return p === null ? current : p; }')
+
+            shared.gradio['model_dir'].change(apply_model_dir, gradio('model_dir'), None, show_progress=False)
 
         shared.gradio['show_two_notebook_columns'].change(
             handle_default_to_notebook_change,
@@ -84,6 +97,12 @@ def handle_default_to_notebook_change(show_two_columns, default_input, default_o
             default_input,
             gr.update(value=default_prompt, choices=utils.get_available_prompts())
         ]
+
+
+def apply_model_dir(value):
+    shared.args.model_dir = value
+    if Path(value).is_dir():
+        shared.user_config = shared.load_user_config()
 
 
 def set_interface_arguments(extensions, bool_active):
