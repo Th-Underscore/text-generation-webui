@@ -622,7 +622,8 @@ class LMDeployModel:
                     max_batch_size=max_batch_size,
                     quant_policy=quant_policy,
                     cache_max_entry_count=cache_max_entry_count,
-                    max_prefill_token_num=256,
+                    max_prefill_token_num=2048,
+                    num_tokens_per_iter=2048,
                     enable_prefix_caching=True,
                 )
                 tm_kwargs.update(extra_flags)
