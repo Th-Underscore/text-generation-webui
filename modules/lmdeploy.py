@@ -123,7 +123,7 @@ class _workspace_load_hook:
             return self._orig_autoget_backend(model_path)
 
         def _from_hf(self_tm, model_path, engine_config):
-            import _turbomind as _tm_c
+            import _turbomind as _tm_c  # type: ignore
             with open(osp.join(wp, 'config.yaml')) as f:
                 cfg_data = yaml.safe_load(f)
             logger.info(
@@ -189,7 +189,7 @@ class _workspace_load_hook:
 
             def _copy(tm_tensor, fpath):
                 try:
-                    import _turbomind as _tm_c
+                    import _turbomind as _tm_c  # type: ignore
                     if tm_tensor.type == _tm_c.DataType.TYPE_UINT32:
                         tm_tensor = tm_tensor.view(_tm_c.DataType.TYPE_INT32)
                 except Exception:
@@ -390,7 +390,7 @@ class _cpu_realtime_conversion:
 
             if name in tm_params:
                 try:
-                    import _turbomind as _tm
+                    import _turbomind as _tm  # type: ignore
                 except ImportError:
                     _tm = None
                 failed = 0
