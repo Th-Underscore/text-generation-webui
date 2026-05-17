@@ -22,6 +22,50 @@ CACHE_SENTINEL = 'tm_weights_cache'
 _WEIGHT_CACHE_VERSION = '1.0'
 
 
+def _parse_extra_flags(flags_str: str | None) -> dict:
+    if not flags_str:
+        return {}
+
+    flags_str = flags_str.strip()
+    if not flags_str:
+        return {}
+
+    if flags_str.startswith('-'):
+        import shlex
+        tokens = shlex.split(flags_str)
+        kwargs = {}
+        i = 0
+        while i < len(tokens):
+            token = tokens[i]
+            if token.startswith('--'):
+                key = token[2:].replace('-', '_')
+                i += 1
+                if i < len(tokens) and not tokens[i].startswith('-'):
+                    kwargs[key] = tokens[i]
+                    i += 1
+            elif token.startswith('-'):
+                key = token[1:].replace('-', '_')
+                i += 1
+                if i < len(tokens) and not tokens[i].startswith('-'):
+                    kwargs[key] = tokens[i]
+                    i += 1
+            else:
+                i += 1
+        return kwargs
+    else:
+        kwargs = {}
+        for item in flags_str.split(','):
+            item = item.strip()
+            if not item:
+                continue
+            if '=' in item:
+                key, value = item.split('=', 1)
+                kwargs[key.strip().replace('-', '_')] = value.strip()
+            else:
+                kwargs[item.strip().replace('-', '_')] = True
+        return kwargs
+
+
 # ---------------------------------------------------------------------------
 # Workspace loader
 # ---------------------------------------------------------------------------
@@ -549,6 +593,7 @@ class LMDeployModel:
         max_batch_size = getattr(shared.args, 'max_batch_size', 1) or 1
         cache_max_entry_count = getattr(shared.args, 'cache_max_entry_count', None) or 0.05
         cpu_realtime = getattr(shared.args, 'cpu_realtime_conversion', True)
+        extra_flags = _parse_extra_flags(getattr(shared.args, 'extra_flags', None))
 
         quant_policy = {'q8': 8, 'q4': 4}.get(cache_type, 0)
 
@@ -571,7 +616,7 @@ class LMDeployModel:
 
         try:
             if backend == 'turbomind':
-                engine_config = TurbomindEngineConfig(
+                tm_kwargs = dict(
                     tp=tp,
                     session_len=ctx_size,
                     max_batch_size=max_batch_size,
@@ -580,6 +625,8 @@ class LMDeployModel:
                     max_prefill_token_num=256,
                     enable_prefix_caching=True,
                 )
+                tm_kwargs.update(extra_flags)
+                engine_config = TurbomindEngineConfig(**tm_kwargs)
 
                 if is_workspace:
                     logger.info(f"Loading pre-converted TurboMind workspace: {model_path_str}")
@@ -601,13 +648,15 @@ class LMDeployModel:
                         )
 
             elif backend == 'pytorch':
-                engine_config = PytorchEngineConfig(
+                pt_kwargs = dict(
                     tp=tp,
                     session_len=ctx_size,
                     max_batch_size=max_batch_size,
                     cache_max_entry_count=cache_max_entry_count,
                     eager_mode=True,
                 )
+                pt_kwargs.update(extra_flags)
+                engine_config = PytorchEngineConfig(**pt_kwargs)
                 pipeline = Pipeline(
                     str(path_to_model),
                     backend_config=engine_config,

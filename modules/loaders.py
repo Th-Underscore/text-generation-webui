@@ -83,6 +83,7 @@ loaders_and_params = OrderedDict({
         'cache_max_entry_count',
         'cpu_realtime_conversion',
         'cpu_cast_export',
+        'extra_flags',
     ]
 })
 

@@ -104,7 +104,7 @@ def create_ui():
                                 shared.gradio['ubatch_size'] = gr.Slider(label="ubatch_size", minimum=1, maximum=4096, step=1, value=shared.args.ubatch_size)
                                 shared.gradio['fit_target'] = gr.Textbox(label='fit-target', value=shared.args.fit_target, info='Target VRAM margin per device for auto GPU layers (MiB). Comma-separated list for multiple devices.')
                                 shared.gradio['tensor_split'] = gr.Textbox(label='tensor_split', info='List of proportions to split the model across multiple GPUs. Example: 60,40')
-                                shared.gradio['extra_flags'] = gr.Textbox(label='extra-flags', info='Extra flags to pass to llama-server. Example: --jinja --rpc 192.168.1.100:50052', value=shared.args.extra_flags)
+                                shared.gradio['extra_flags'] = gr.Textbox(label='extra-flags', info='Extra flags to pass to the loader (llama.cpp / LMDeploy). Example: --jinja --rpc 192.168.1.100:50052', value=shared.args.extra_flags)
                                 shared.gradio['cpu_memory'] = gr.Number(label="Maximum CPU memory in GiB. Use this for CPU offloading.", value=shared.args.cpu_memory)
                                 shared.gradio['compute_dtype'] = gr.Dropdown(label="compute_dtype", choices=["bfloat16", "float16", "float32"], value=shared.args.compute_dtype, info='Used by load-in-4bit.')
                                 shared.gradio['quant_type'] = gr.Dropdown(label="quant_type", choices=["nf4", "fp4"], value=shared.args.quant_type, info='Used by load-in-4bit.')
