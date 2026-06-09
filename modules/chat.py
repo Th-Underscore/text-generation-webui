@@ -462,6 +462,7 @@ def generate_chat_prompt(user_input, state, **kwargs):
                 msg_dict = {"role": "assistant", "content": final_content}
                 if '<|channel|>analysis<|message|>' in assistant_msg:
                     msg_dict["thinking"] = thinking_content
+                    msg_dict["raw_content"] = assistant_msg
 
                 messages.insert(insert_pos, msg_dict)
 
@@ -485,7 +486,20 @@ def generate_chat_prompt(user_input, state, **kwargs):
                 msg_dict = {"role": "assistant", "content": final_content.strip()}
                 if thinking_content:
                     msg_dict["reasoning_content"] = thinking_content
+                    msg_dict["raw_content"] = assistant_msg
 
+                messages.insert(insert_pos, msg_dict)
+
+            # End-only </think> format (DeepSeek V4 Pro, Qwen3-next): the opener
+            # is emitted by the template's generation prompt, so model output starts
+            # with reasoning text and uses </think> as a separator.
+            elif '</think>' in assistant_msg:
+                thinking_content, final_content = assistant_msg.split('</think>', 1)
+                msg_dict = {"role": "assistant", "content": final_content.strip()}
+                thinking_content = thinking_content.strip()
+                if thinking_content:
+                    msg_dict["reasoning_content"] = thinking_content
+                    msg_dict["raw_content"] = assistant_msg
                 messages.insert(insert_pos, msg_dict)
 
             else:
@@ -558,17 +572,25 @@ def generate_chat_prompt(user_input, state, **kwargs):
         if _continue:
             messages = copy.deepcopy(messages)
         last_message = messages[-1].copy()
+
+        # Splice partial thoughts in-place to avoid a fresh thinking block from re-rendering.
+        content = last_message.get("content", "")
+        partial_thought = last_message.get("thinking", "") or last_message.get("reasoning_content", "")
+        thinking_only_partial = not content and bool(partial_thought.strip())
+
         if _continue:
-            if state['mode'] == 'chat-instruct':
+            if state['mode'] == 'chat-instruct' or not thinking_only_partial:
                 messages = messages[:-1]
             else:
                 messages[-1]["content"] = "fake assistant message replace me"
                 messages.append({"role": "assistant", "content": "this will get deleted"})
 
-        if state['mode'] != 'chat-instruct':
-            add_generation_prompt = (not _continue and not impersonate)
+        if state['mode'] == 'chat-instruct':
+            add_generation_prompt = _continue and not thinking_only_partial
+        elif thinking_only_partial:
+            add_generation_prompt = not _continue and not impersonate
         else:
-            add_generation_prompt = False
+            add_generation_prompt = not impersonate
 
         prompt = renderer(
             messages=messages,
@@ -586,24 +608,20 @@ def generate_chat_prompt(user_input, state, **kwargs):
                 outer_messages.append({"role": "system", "content": state['custom_system_message']})
 
             outer_messages.append({"role": "user", "content": command})
-            if _continue:
+            if _continue and thinking_only_partial:
                 outer_messages.append(last_message.copy())
                 outer_messages[-1]["content"] = "fake assistant message replace me"
                 outer_messages.append({"role": "assistant", "content": "this will get deleted"})
 
             prompt = instruct_renderer(
                 messages=outer_messages,
-                add_generation_prompt=not _continue
+                add_generation_prompt=not thinking_only_partial
             )
 
         if _continue:
-            prompt = prompt.split("fake assistant message replace me", 1)[0]
+            if thinking_only_partial:
+                prompt = prompt.split("fake assistant message replace me", 1)[0]
 
-            content = last_message.get("content", "")
-            partial_thought = last_message.get("thinking", "") or last_message.get("reasoning_content", "")
-
-            # Handle partial thinking blocks (GPT-OSS and Seed-OSS)
-            if not content and partial_thought and partial_thought.strip():
                 search_string = partial_thought.strip()
                 index = prompt.rfind(search_string)
                 if index != -1:
@@ -612,8 +630,29 @@ def generate_chat_prompt(user_input, state, **kwargs):
                     # Fallback if search fails: just append the thought
                     prompt += partial_thought
             else:
-                # All other cases
-                prompt += content
+                append_content = last_message.get("raw_content", "") or content
+                prompt_tail = prompt.rstrip("\n")
+
+                for fmt_start, fmt_end, fmt_content_tag in THINKING_FORMATS:
+                    if fmt_start is None or not prompt_tail.endswith(fmt_start):
+                        continue
+                    if append_content.startswith(fmt_start):
+                        # Avoid duplicating the opener the template already emitted
+                        append_content = append_content[len(fmt_start):].lstrip("\n")
+                    elif fmt_end and fmt_end in append_content:
+                        # Content closes the block itself (DeepSeek-style separator)
+                        pass
+                    else:
+                        # Close the opened thinking block so plain content doesn't land inside it
+                        prompt += "\n" + fmt_end + (fmt_content_tag or "") + "\n\n"
+                    break
+                else:
+                    # GPT-OSS: a bare "<|start|>assistant" gen prompt needs the final-channel
+                    # marker before plain content. raw_content already includes channel framing.
+                    if not last_message.get("raw_content") and prompt_tail.endswith("<|start|>assistant"):
+                        prompt += "<|channel|>final<|message|>"
+
+                prompt += append_content
 
         if impersonate:
             prompt = prompt.split("fake user message replace me", 1)[0]

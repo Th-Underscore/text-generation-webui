@@ -882,6 +882,29 @@ if (document.readyState === "loading") {
 }
 
 //------------------------------------------------
+// Spellcheck toggle (Electron only; checkbox is hidden in the browser)
+//------------------------------------------------
+
+function setupSpellcheckToggle() {
+  if (!window.electronAPI) return;
+  const checkbox = document.querySelector("#spellcheck input[data-testid=\"checkbox\"]");
+  if (!checkbox) {
+    setTimeout(setupSpellcheckToggle, 500);
+    return;
+  }
+
+  const apply = () => { document.body.spellcheck = checkbox.checked; };
+  apply();
+  checkbox.addEventListener("change", apply);
+}
+
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", setupSpellcheckToggle);
+} else {
+  setupSpellcheckToggle();
+}
+
+//------------------------------------------------
 // Tooltips
 //------------------------------------------------
 

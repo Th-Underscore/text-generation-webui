@@ -249,7 +249,7 @@ def list_interface_input_elements():
     ]
 
     if shared.is_electron:
-        elements += ['model_dir']
+        elements += ['model_dir', 'spellcheck']
 
     if not shared.args.portable:
         # Image generation elements
@@ -519,7 +519,7 @@ def setup_auto_save():
     ]
 
     if shared.is_electron:
-        change_elements += ['model_dir']
+        change_elements += ['model_dir', 'spellcheck']
 
     if not shared.args.portable:
         # Image generation tab (ui_image_generation.py)

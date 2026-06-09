@@ -460,6 +460,7 @@ def generate_reply_HF(question, original_question, state, stopping_strings=None,
                     output = output.to(device)
 
             starting_from = 0 if shared.is_seq2seq else len(input_ids[0])
+            shared.model.last_completion_token_count = len(output) - starting_from
             yield get_reply_from_output_ids(output, state, starting_from=starting_from)
 
         # Stream the reply 1 token at a time.

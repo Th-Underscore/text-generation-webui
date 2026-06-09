@@ -141,11 +141,15 @@ def _render_web_search_body(body):
     cards = []
     for r in results:
         title = html.escape(r['title'])
-        url = html.escape(r['url'])
+        url = r['url']
         snippet = html.escape(r.get('snippet', ''))
+        if url.lower().startswith(('http://', 'https://')):
+            link = f'<a class="web-search-title" href="{html.escape(url)}" target="_blank" rel="noopener noreferrer">{title}</a>'
+        else:
+            link = f'<span class="web-search-title">{title}</span>'
         cards.append(
             f'<div class="web-search-result">'
-            f'<a class="web-search-title" href="{url}" target="_blank" rel="noopener noreferrer">{title}</a>'
+            f'{link}'
             f'<div class="web-search-snippet">{snippet}</div>'
             f'</div>'
         )

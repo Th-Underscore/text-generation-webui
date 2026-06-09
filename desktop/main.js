@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, dialog, ipcMain, screen } = require("electron");
+const { app, BrowserWindow, Menu, dialog, ipcMain, screen, shell } = require("electron");
 const { spawn } = require("child_process");
 const path = require("path");
 const fs = require("fs");
@@ -115,17 +115,31 @@ function createWindow(port) {
       preload: path.join(__dirname, "preload.js"),
       nodeIntegration: false,
       contextIsolation: true,
-      spellcheck: false,
+      spellcheck: true,
     },
   });
   if (state && state.maximized) mainWindow.maximize();
   mainWindow.webContents.on("context-menu", (_, params) => {
     const tmpl = [];
+    if (params.misspelledWord) {
+      for (const s of params.dictionarySuggestions) {
+        tmpl.push({ label: s, click: () => mainWindow.webContents.replaceMisspelling(s) });
+      }
+      if (params.dictionarySuggestions.length) tmpl.push({ type: "separator" });
+      tmpl.push(
+        { label: "Add to dictionary", click: () => mainWindow.webContents.session.addWordToSpellCheckerDictionary(params.misspelledWord) },
+        { type: "separator" },
+      );
+    }
     if (params.editFlags.canCut) tmpl.push({ role: "cut" });
     if (params.editFlags.canCopy) tmpl.push({ role: "copy" });
     if (params.editFlags.canPaste) tmpl.push({ role: "paste" });
     if (params.editFlags.canSelectAll) tmpl.push({ type: "separator" }, { role: "selectAll" });
     if (tmpl.length) Menu.buildFromTemplate(tmpl).popup({ window: mainWindow });
+  });
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:\/\//i.test(url)) shell.openExternal(url);
+    return { action: "deny" };
   });
   mainWindow.on("page-title-updated", (e) => e.preventDefault());
   mainWindow.webContents.on("will-prevent-unload", (e) => e.preventDefault());

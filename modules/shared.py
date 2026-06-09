@@ -301,6 +301,7 @@ settings = {
     'show_two_notebook_columns': False,
     'paste_to_attachment': False,
     'include_past_attachments': True,
+    'spellcheck': False,
 
     # Generation parameters - Curve shape
     'temperature': neutral_samplers['temperature'],

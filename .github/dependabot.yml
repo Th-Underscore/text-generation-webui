@@ -9,6 +9,5 @@ updates:
     directories:
       - "/requirements/full/"
       - "/requirements/portable/"
-    target-branch: "dev"
     schedule:
       interval: "weekly"
