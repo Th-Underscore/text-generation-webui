@@ -147,8 +147,8 @@ group.add_argument('--backend', type=str, default='turbomind', help='Inference b
 group.add_argument('--max-batch-size', type=int, default=32, help='Maximum batch size.')
 group.add_argument('--tensor-parallel', type=int, default=1, help='Tensor parallelism degree.')
 group.add_argument('--cache-max-entry-count', type=float, default=0.8, help='Percentage of free GPU memory for KV cache AFTER model loading (0.0-1.0). Lower values reduce memory usage.')
-group.add_argument('--disable-prefix-caching', action='store_true', default=False, help='Disable LMDeploy prefix caching (test knob: concurrent sessions may race in the BlockTrie).')
-group.add_argument('--cpu-realtime-conversion', action='store_true', default=False, help='Use CPU realtime conversion (no VRAM spike during weight export).')
+group.add_argument('--disable-prefix-caching', action='store_true', default=False, help='Disable LMDeploy prefix caching (off by default in v0.15: concurrent sessions and prefix reuse are race-free).')
+group.add_argument('--cpu-realtime-conversion', action='store_true', default=True, help='Keep the HF->TurboMind conversion on CPU (default on: required on 16 GB GPUs for the v0.15 engine; slightly slower load).')
 group.add_argument('--cpu-cast-export', action='store_true', default=False, help='Cast tensors to target dtype on CPU before export (saves VRAM during conversion).')
 
 # Gradio
