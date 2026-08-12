@@ -624,7 +624,7 @@ class LMDeployModel:
                     cache_max_entry_count=cache_max_entry_count,
                     max_prefill_token_num=2048,
                     num_tokens_per_iter=2048,
-                    enable_prefix_caching=True,
+                    enable_prefix_caching=not getattr(shared.args, 'disable_prefix_caching', False),
                 )
                 tm_kwargs.update(extra_flags)
                 engine_config = TurbomindEngineConfig(**tm_kwargs)
@@ -681,15 +681,15 @@ class LMDeployModel:
         return False
 
     def generate_with_streaming(self, prompt, state):
+        input_ids = self.encode(prompt, add_bos=False)
+        prompt_token_count = len(input_ids)
+
         gen_config = self._prepare_generation_config(state)
 
         max_new_tokens = state['max_new_tokens']
         if state.get('auto_max_new_tokens'):
-            max_new_tokens = state['truncation_length'] - self._last_prompt_token_count
+            max_new_tokens = state['truncation_length'] - prompt_token_count
         gen_config.max_new_tokens = max_new_tokens
-
-        input_ids = self.encode(prompt, add_bos=False)
-        self._last_prompt_token_count = len(input_ids)
 
         stop_event = state.get('stop_event')
         response_text = ""
@@ -760,6 +760,9 @@ class LMDeployModel:
 
     @property
     def last_prompt_token_count(self):
+        # Kept because external modules rely on it: text_generation.py:408 writes it
+        # before each generation call, and chat.py / api/completions.py read it for
+        # context-length hints and usage.prompt_tokens.
         return self._last_prompt_token_count
 
     @last_prompt_token_count.setter

@@ -32,3 +32,16 @@ wandb
 /docker-compose.yml
 /Dockerfile
 .env
+
+./.conda
+/.conda
+.conda
+./.cpu
+./.vllm
+/.vllm
+CMD_FLAGS*
+*.bat
+*.code-workspace
+*.sh
+*.zip
+.github
