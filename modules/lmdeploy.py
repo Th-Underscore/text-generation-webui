@@ -4,6 +4,7 @@ import gc
 import json
 import os
 import os.path as osp
+import time
 from pathlib import Path
 
 import lmdeploy
@@ -80,12 +81,23 @@ class _cpu_checkpoint_load:
     single H2D copy into each pre-allocated C++ param slot. Same goal as the
     pre-0.15 ``_cpu_realtime_conversion`` patch, one order of magnitude
     smaller.
+
+    tp > 1 additionally needs a GPU-bound shim on ``_copy_shard_to_param``:
+    the C++ param binding uses a peer-copy path (bind.cpp) that requires the
+    shard to be GPU-resident by the time ``copy_from()`` is called. With
+    get/pop returning CPU tensors, the peer path received a host pointer and
+    aborted with "CUDA error: invalid argument" at bind.cpp:346. Forcing the
+    per-param H2D copy before the handoff keeps the peer path on device
+    tensors, with the transient still bounded to one param at a time.
     """
 
     def __enter__(self):
+        import torch
         from lmdeploy.turbomind.checkpoint import PytorchCheckpoint, SafetensorsCheckpoint
+        from lmdeploy.turbomind.builders import _base as _base_mod
         self._classes = (SafetensorsCheckpoint, PytorchCheckpoint)
-        logger.info("[cpu_checkpoint] CPU conversion active (checkpoint get/pop patched)")
+        self._base_mod = _base_mod
+        logger.info("[cpu_checkpoint] CPU conversion active (checkpoint get/pop + copy shim patched)")
         self._saved = {}
         for cls in self._classes:
             for method in ('get', 'pop'):
@@ -106,11 +118,22 @@ class _cpu_checkpoint_load:
         for cls in self._classes:
             cls.get = _cpu_get
             cls.pop = _cpu_pop
+
+        self._copy_orig = _base_mod._copy_shard_to_param
+
+        def _gpu_bound_copy(handle, param_name, shard, *, alloc_shape=None, alloc_dtype=None):
+            if isinstance(shard, torch.Tensor) and not shard.is_cuda:
+                shard = shard.cuda()
+            return self._copy_orig(handle, param_name, shard,
+                                   alloc_shape=alloc_shape, alloc_dtype=alloc_dtype)
+
+        _base_mod._copy_shard_to_param = _gpu_bound_copy
         return self
 
     def __exit__(self, *_):
         for (cls, method), orig in self._saved.items():
             setattr(cls, method, orig)
+        self._base_mod._copy_shard_to_param = self._copy_orig
 
 
 # ---------------------------------------------------------------------------
@@ -228,6 +251,7 @@ class LMDeployModel:
         max_batch_size = getattr(shared.args, 'max_batch_size', 1) or 1
         cache_max_entry_count = getattr(shared.args, 'cache_max_entry_count', None) or 0.8
         cpu_realtime = getattr(shared.args, 'cpu_realtime_conversion', True)
+        language_model_only = getattr(shared.args, 'language_model_only', False)
         extra_flags = _parse_extra_flags(getattr(shared.args, 'extra_flags', None))
 
         quant_policy = {'q8': 8, 'q4': 4}.get(cache_type, 0)
@@ -253,6 +277,8 @@ class LMDeployModel:
                     num_tokens_per_iter=2048,
                     enable_prefix_caching=prefix_caching,
                 )
+                if language_model_only:
+                    tm_kwargs['language_model_only'] = True
                 if prefix_caching:
                     tm_kwargs.update(
                         cache_prompt='all',
@@ -262,7 +288,20 @@ class LMDeployModel:
                 tm_kwargs.update(extra_flags)
                 engine_config = TurbomindEngineConfig(**tm_kwargs)
 
-                load_ctx = _cpu_checkpoint_load() if cpu_realtime else contextlib.nullcontext()
+                # CPU checkpoint conversion is needed for single-GPU loads
+                # where the in-GPU conversion OOMs, and is now also safe at
+                # tp=2 via the GPU-bound copy shim (the old tp>1 crash was the
+                # peer-copy path in bind.cpp receiving a CPU-resident tensor).
+                # It keeps every intermediate on CPU; per-param H2D transients
+                # stay bounded, so even a multimodal W4A16 model (27B + vision
+                # tower + MTP) fits the V100s. In-GPU conversion is kept for
+                # tp > 2 (multi-node), where the shard exchange is unaffected.
+                use_cpu_patch = cpu_realtime and tp <= 2
+                if use_cpu_patch:
+                    logger.info("[lmdeploy] cpu_realtime=True -- CPU conversion patch active")
+                else:
+                    logger.info(f"[lmdeploy] cpu_realtime={cpu_realtime}, tp={tp} -- using in-GPU conversion")
+                load_ctx = _cpu_checkpoint_load() if use_cpu_patch else contextlib.nullcontext()
                 with load_ctx:
                     pipeline = Pipeline(
                         model_path_str,
@@ -305,6 +344,7 @@ class LMDeployModel:
     def generate_with_streaming(self, prompt, state):
         input_ids = self.encode(prompt, add_bos=False)
         prompt_token_count = len(input_ids)
+        self.last_prompt_token_count = prompt_token_count
 
         gen_config = self._prepare_generation_config(state)
 
@@ -312,7 +352,7 @@ class LMDeployModel:
         if state.get('auto_max_new_tokens'):
             max_new_tokens = state['truncation_length'] - prompt_token_count
         gen_config.max_new_tokens = max_new_tokens
-
+        
         stop_event = state.get('stop_event')
         response_text = ""
 
@@ -336,12 +376,22 @@ class LMDeployModel:
             loop = self.pipeline.internal_thread.loop
             future = asyncio.run_coroutine_threadsafe(run_async(), loop)
 
-            while not future.done():
+            while not (future.done() and output_queue.empty()):
                 try:
-                    response_text += output_queue.get_nowait()
+                    item = output_queue.get_nowait()
+                    response_text += item or ''
                     yield response_text
                 except asyncio.QueueEmpty:
-                    pass
+                    if future.done():
+                        break
+                    time.sleep(0.005)
+
+            if future.cancelled():
+                yield response_text
+                return
+            exc = future.exception()
+            if exc is not None:
+                raise exc
 
         except (GeneratorExit, StopIteration, asyncio.CancelledError):
             pass
@@ -362,6 +412,10 @@ class LMDeployModel:
             temperature = (state['dynatemp_low'] + state['dynatemp_high']) / 2
 
         return GenerationConfig(
+            # lmdeploy 0.15+ defaults do_sample=False, which forces greedy decode
+            # (top_k=1, temperature=1.0) in _determine_gen_config regardless of the
+            # temperature in the request. Sampling must be opted in explicitly.
+            do_sample=temperature > 0,
             temperature=temperature,
             top_k=state['top_k'] if state['top_k'] > 0 else 128,
             top_p=state['top_p'],
