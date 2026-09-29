@@ -3,6 +3,8 @@
 // -------------------------------------------------
 
 function getProfilePictureUrl() {
+  const thumb = document.querySelector(".pfp_character");
+  if (thumb) return thumb.src.replace("pfp_character_thumb.png", "pfp_character.png");
   return "/file/user_data/cache/pfp_character.png?time=" + Date.now();
 }
 
@@ -271,6 +273,7 @@ function removeLastClick() {
 }
 
 let _scrollPending = false;
+const SMOOTH_SCROLL_WINDOW_MS = 700;
 
 function autoScrollToBottom() {
   if (_scrollPending) return;
@@ -282,7 +285,11 @@ function autoScrollToBottom() {
       if (chatParent) {
         const maxScroll = chatParent.scrollHeight - chatParent.clientHeight;
         if (maxScroll > 0 && chatParent.scrollTop < maxScroll - 1) {
-          chatParent.scrollTop = maxScroll;
+          if (Date.now() < window.smoothScrollUntilTs) {
+            chatParent.scrollTo({ top: maxScroll, behavior: "smooth" });
+          } else {
+            chatParent.scrollTop = maxScroll;
+          }
         }
       }
     }
@@ -291,17 +298,35 @@ function autoScrollToBottom() {
 
 function updateInstructPadding() {
   const chatElement = document.getElementById("chat");
-  if (chatElement && chatElement.getAttribute("data-mode") === "instruct") {
-    const messagesContainer = chatElement.querySelector(".messages");
-    const lastChild = messagesContainer?.lastElementChild;
+  const messagesContainer = chatElement?.querySelector(".messages");
+  if (!messagesContainer) return;
+
+  // The top-anchored buffer only applies in instruct mode with something to
+  // anchor against; everything else clears it, so the space can't leak across
+  // a mode switch.
+  let bufferHeight = 0;
+  if (chatElement.getAttribute("data-mode") === "instruct") {
+    const lastChild = messagesContainer.lastElementChild;
     const prevSibling = lastChild?.previousElementSibling;
     if (lastChild && prevSibling && chatElement.offsetHeight > 0) {
-      let bufferHeight = Math.max(0, Math.max(window.innerHeight - 128 - 84, window.innerHeight - prevSibling.offsetHeight - 84) - lastChild.offsetHeight);
-      if (window.innerWidth <= 924) {
-        bufferHeight = Math.max(0, bufferHeight - 32);
+      // Target the scroll container's *content* height — clientHeight minus
+      // its own vertical padding — so the buffer fills the viewport exactly
+      // instead of overshooting by that padding into a permanent scrollbar.
+      // The viewport-128 term floors the buffer so a tall previous message
+      // can't shrink it away.
+      const chatParent = document.querySelector(".chat-parent");
+      let viewport = window.innerHeight;
+      if (chatParent) {
+        const cs = getComputedStyle(chatParent);
+        viewport = chatParent.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom);
       }
-      messagesContainer.style.paddingBottom = `${bufferHeight}px`;
+      bufferHeight = Math.max(0, Math.max(viewport - 128, viewport - prevSibling.offsetHeight) - lastChild.offsetHeight);
     }
+  }
+
+  const next = bufferHeight ? `${bufferHeight}px` : "";
+  if (messagesContainer.style.paddingBottom !== next) {
+    messagesContainer.style.paddingBottom = next;
   }
 }
 
@@ -333,12 +358,19 @@ function applyMorphdomUpdate(data) {
 
   const queryScope = target_element;
 
-  // Track open blocks and store their scroll positions
+  const messagesContainer = document.getElementsByClassName("messages")[0];
+  const messagesCountBefore = messagesContainer ? messagesContainer.children.length : 0;
+  // Survive morphdom: server HTML has no inline style.
+  const savedPaddingBottom = messagesContainer ? messagesContainer.style.paddingBottom : "";
+
+  // Track open/closed blocks and store scroll positions for open ones
   const openBlocks = new Set();
+  const closedBlocks = new Set();
   const scrollPositions = {};
   queryScope.querySelectorAll(".thinking-block").forEach(block => {
     const blockId = block.getAttribute("data-block-id");
-    if (blockId && block.hasAttribute("open")) {
+    if (!blockId || block.querySelector(".tool-approval-buttons")) return;
+    if (block.hasAttribute("open")) {
       openBlocks.add(blockId);
       const content = block.querySelector(".thinking-content");
       if (content) {
@@ -348,6 +380,8 @@ function applyMorphdomUpdate(data) {
           isAtBottom: isAtBottom
         };
       }
+    } else {
+      closedBlocks.add(blockId);
     }
   });
 
@@ -368,15 +402,16 @@ function applyMorphdomUpdate(data) {
           }
         }
 
-        // For thinking blocks, assume closed by default
+        // For thinking blocks that already exist in the DOM, preserve the
+        // user's toggle state across streaming updates (in either direction).
+        // New blocks fall through to the server-rendered open/closed state.
         if (fromEl.classList && fromEl.classList.contains("thinking-block") &&
            toEl.classList && toEl.classList.contains("thinking-block")) {
           const blockId = toEl.getAttribute("data-block-id");
-          // Remove open attribute by default
-          toEl.removeAttribute("open");
-          // If this block was explicitly opened by user, keep it open
           if (blockId && openBlocks.has(blockId)) {
             toEl.setAttribute("open", "");
+          } else if (blockId && closedBlocks.has(blockId)) {
+            toEl.removeAttribute("open");
           }
         }
 
@@ -403,9 +438,28 @@ function applyMorphdomUpdate(data) {
     }
   );
 
+  // Re-apply the saved buffer only if the messages list still exists after
+  // morphdom. When the chat empties, morphdom repurposes that node into the
+  // welcome greeting (stripping its inline style); restoring the stale padding
+  // onto it would leave a phantom scrollbar that updateInstructPadding can't
+  // clear, since it keys off ".messages".
+  const messagesAfter = document.getElementsByClassName("messages")[0];
+  if (messagesAfter && savedPaddingBottom) {
+    messagesAfter.style.paddingBottom = savedPaddingBottom;
+  }
+
   // Syntax highlighting and LaTeX
   if (window.doSyntaxHighlighting) {
     window.doSyntaxHighlighting();
+  }
+
+  // Only animate the padding jump on a fresh submission, not on chat switches or streaming chunks.
+  if (window.pendingGenerationStart) {
+    const messagesCountAfter = messagesContainer ? messagesContainer.children.length : 0;
+    if (messagesCountAfter > messagesCountBefore) {
+      window.smoothScrollUntilTs = Date.now() + SMOOTH_SCROLL_WINDOW_MS;
+    }
+    window.pendingGenerationStart = false;
   }
 
   // Auto-scroll runs both before and after padding update.

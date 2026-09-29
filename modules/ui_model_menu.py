@@ -22,6 +22,33 @@ from modules.models_settings import (
 )
 from modules.utils import gradio
 
+NGRAM_SIZE_TYPES = ('ngram-mod', 'ngram-simple', 'ngram-map-k', 'ngram-map-k4v')
+NGRAM_MAP_TYPES = ('ngram-simple', 'ngram-map-k', 'ngram-map-k4v')
+SPEC_TYPE_OUTPUTS = ('spec_ngram_size_n', 'spec_ngram_size_m', 'spec_ngram_min_hits', 'draft_model_header', 'model_draft', 'model_draft_refresh', 'gpu_layers_draft', 'device_draft')
+
+
+def spec_type_visibility_updates(spec_type):
+    is_ngram_size = spec_type in NGRAM_SIZE_TYPES
+    is_ngram_map = spec_type in NGRAM_MAP_TYPES
+    is_draft = spec_type in ('none', 'draft-mtp')
+    visibility = {
+        'spec_ngram_size_n': is_ngram_size,
+        'spec_ngram_size_m': is_ngram_size,
+        'spec_ngram_min_hits': is_ngram_map,
+        'draft_model_header': is_draft,
+        'model_draft': is_draft,
+        'model_draft_refresh': is_draft,
+        'gpu_layers_draft': is_draft,
+        'device_draft': is_draft,
+    }
+    return [gr.update(visible=visibility[name]) for name in SPEC_TYPE_OUTPUTS]
+
+
+def loader_spec_overlay(loader, spec_type):
+    if loader == 'llama.cpp':
+        return spec_type_visibility_updates(spec_type)
+    return [gr.update()] * len(SPEC_TYPE_OUTPUTS)
+
 
 def create_ui():
     mu = shared.args.multi_user
@@ -46,7 +73,7 @@ def create_ui():
                             shared.gradio['gpu_split'] = gr.Textbox(label='gpu-split', info='Comma-separated list of VRAM (in GB) to use per GPU. Example: 20,7,7')
                             shared.gradio['attn_implementation'] = gr.Dropdown(label="attn-implementation", choices=['sdpa', 'eager', 'flash_attention_2'], value=shared.args.attn_implementation, info='Attention implementation.')
                             shared.gradio['cache_type'] = gr.Dropdown(label="cache-type", choices=['fp16', 'q8_0', 'q4_0', 'fp8', 'q8', 'q7', 'q6', 'q5', 'q4', 'q3', 'q2'], value=shared.args.cache_type, allow_custom_value=True, info='Valid options: llama.cpp - fp16, q8_0, q4_0; ExLlamaV3 - fp16, q2 to q8. For ExLlamaV3, you can type custom combinations for separate k/v bits (e.g. q4_q8).')
-                            shared.gradio['fit_target'] = gr.Textbox(label='fit-target', value=shared.args.fit_target, info='Target VRAM margin per device for auto GPU layers (MiB). Comma-separated list for multiple devices.')
+                            shared.gradio['split_mode'] = gr.Dropdown(label='split-mode', choices=['layer', 'row', 'tensor', 'none'], value=shared.args.split_mode, info='How to split the model across multiple GPUs. "tensor" can make multi-GPU significantly faster.')
                             shared.gradio['tp_backend'] = gr.Dropdown(label="tp-backend", choices=['native', 'nccl'], value=shared.args.tp_backend, info='The backend for tensor parallelism.')
 
                         with gr.Column():
@@ -111,27 +138,25 @@ def create_ui():
                             # Multimodal
                             with gr.Accordion("Multimodal (vision)", open=False) as shared.gradio['mmproj_accordion']:
                                 with gr.Row():
-                                    shared.gradio['mmproj'] = gr.Dropdown(label="mmproj file", choices=utils.get_available_mmproj(), value=lambda: shared.args.mmproj or 'None', elem_classes='slim-dropdown', info=f'Select a file that matches your model. Must be placed in {shared.user_data_dir}/mmproj/', interactive=not mu)
+                                    shared.gradio['mmproj'] = gr.Dropdown(label="mmproj file", choices=utils.get_available_mmproj(), value=lambda: shared.args.mmproj or 'None', elem_classes='slim-dropdown', info=f'Select a file that matches your model. Lists files placed in {shared.user_data_dir}/mmproj/, plus any mmproj-*.gguf files found in your main models folder.', interactive=not mu)
                                     ui.create_refresh_button(shared.gradio['mmproj'], lambda: None, lambda: {'choices': utils.get_available_mmproj()}, 'refresh-button', interactive=not mu)
 
                             # Speculative decoding
                             with gr.Accordion("Speculative decoding", open=False) as shared.gradio['speculative_decoding_accordion']:
-                                shared.gradio['draft_max'] = gr.Number(label="draft-max", precision=0, step=1, value=shared.args.draft_max, info='Maximum number of tokens to draft for speculative decoding. Recommended: 4 for draft model, 64 for n-gram.')
+                                shared.gradio['spec_type'] = gr.Dropdown(label="spec-type", choices=['none', 'draft-mtp', 'ngram-mod', 'ngram-simple', 'ngram-map-k', 'ngram-map-k4v'], value=shared.args.spec_type, info='Recommended: draft-mtp if the main model is an MTP build, otherwise ngram-mod.')
+                                shared.gradio['draft_max'] = gr.Number(label="draft-max", precision=0, step=1, value=shared.args.draft_max, info='Maximum number of tokens to draft per step. Recommended: 3 for draft-mtp or a draft model, 64 for n-gram.')
 
-                                gr.Markdown('#### Draft model')
+                                shared.gradio['spec_ngram_size_n'] = gr.Number(label="spec-ngram-size-n", precision=0, step=1, value=shared.args.spec_ngram_size_n, info='N-gram lookup size for speculative decoding.', visible=shared.args.spec_type in NGRAM_SIZE_TYPES)
+                                shared.gradio['spec_ngram_size_m'] = gr.Number(label="spec-ngram-size-m", precision=0, step=1, value=shared.args.spec_ngram_size_m, info='Draft n-gram size for speculative decoding.', visible=shared.args.spec_type in NGRAM_SIZE_TYPES)
+                                shared.gradio['spec_ngram_min_hits'] = gr.Number(label="spec-ngram-min-hits", precision=0, step=1, value=shared.args.spec_ngram_min_hits, info='Minimum n-gram hits for ngram-map speculative decoding.', visible=shared.args.spec_type in NGRAM_MAP_TYPES)
+
+                                shared.gradio['draft_model_header'] = gr.Markdown('#### Draft model', visible=shared.args.spec_type in ('none', 'draft-mtp'))
                                 with gr.Row():
-                                    shared.gradio['model_draft'] = gr.Dropdown(label="model-draft", choices=['None'] + utils.get_available_models(), value=lambda: shared.args.model_draft, elem_classes='slim-dropdown', info='Draft model. Must share the same vocabulary as the main model.', interactive=not mu)
-                                    ui.create_refresh_button(shared.gradio['model_draft'], lambda: None, lambda: {'choices': ['None'] + utils.get_available_models()}, 'refresh-button', interactive=not mu)
+                                    shared.gradio['model_draft'] = gr.Dropdown(label="model-draft", choices=['None'] + utils.get_available_models(), value=lambda: shared.args.model_draft, elem_classes='slim-dropdown', info='Draft model. Must share the same vocabulary as the main model. Optional for draft-mtp (only needed when using a separate mtp-*.gguf head file).', interactive=not mu, visible=shared.args.spec_type in ('none', 'draft-mtp'))
+                                    shared.gradio['model_draft_refresh'] = ui.create_refresh_button(shared.gradio['model_draft'], lambda: None, lambda: {'choices': ['None'] + utils.get_available_models()}, 'refresh-button', interactive=not mu, visible=shared.args.spec_type in ('none', 'draft-mtp'))
 
-                                shared.gradio['gpu_layers_draft'] = gr.Slider(label="gpu-layers-draft", minimum=0, maximum=256, value=shared.args.gpu_layers_draft, info='Number of layers to offload to the GPU for the draft model.')
-                                shared.gradio['device_draft'] = gr.Textbox(label="device-draft", value=shared.args.device_draft, info='Comma-separated list of devices to use for offloading the draft model. Example: CUDA0,CUDA1')
-                                shared.gradio['ctx_size_draft'] = gr.Number(label="ctx-size-draft", precision=0, step=256, value=shared.args.ctx_size_draft, info='Size of the prompt context for the draft model. If 0, uses the same as the main model.')
-
-                                shared.gradio['ngram_header'] = gr.Markdown('#### N-gram (draftless)')
-                                shared.gradio['spec_type'] = gr.Dropdown(label="spec-type", choices=['none', 'ngram-mod', 'ngram-simple', 'ngram-map-k', 'ngram-map-k4v', 'ngram-cache'], value=shared.args.spec_type, info='Draftless speculative decoding type. Recommended: ngram-mod.')
-                                shared.gradio['spec_ngram_size_n'] = gr.Number(label="spec-ngram-size-n", precision=0, step=1, value=shared.args.spec_ngram_size_n, info='N-gram lookup size for speculative decoding.', visible=shared.args.spec_type != 'none')
-                                shared.gradio['spec_ngram_size_m'] = gr.Number(label="spec-ngram-size-m", precision=0, step=1, value=shared.args.spec_ngram_size_m, info='Draft n-gram size for speculative decoding.', visible=shared.args.spec_type != 'none')
-                                shared.gradio['spec_ngram_min_hits'] = gr.Number(label="spec-ngram-min-hits", precision=0, step=1, value=shared.args.spec_ngram_min_hits, info='Minimum n-gram hits for ngram-map speculative decoding.', visible=shared.args.spec_type != 'none')
+                                shared.gradio['gpu_layers_draft'] = gr.Slider(label="gpu-layers-draft", minimum=0, maximum=256, value=shared.args.gpu_layers_draft, info='Number of layers to offload to the GPU for the draft model.', visible=shared.args.spec_type in ('none', 'draft-mtp'))
+                                shared.gradio['device_draft'] = gr.Textbox(label="device-draft", value=shared.args.device_draft, info='Comma-separated list of devices to use for offloading the draft model. Example: CUDA0,CUDA1', visible=shared.args.spec_type in ('none', 'draft-mtp'))
 
                     gr.Markdown("## Other options")
                     with gr.Accordion("See more options", open=False):
@@ -142,6 +167,7 @@ def create_ui():
                                 shared.gradio['threads_batch'] = gr.Slider(label="threads_batch", minimum=0, step=1, maximum=256, value=shared.args.threads_batch)
                                 shared.gradio['batch_size'] = gr.Slider(label="batch_size", minimum=1, maximum=4096, step=1, value=shared.args.batch_size)
                                 shared.gradio['ubatch_size'] = gr.Slider(label="ubatch_size", minimum=1, maximum=4096, step=1, value=shared.args.ubatch_size)
+                                shared.gradio['fit_target'] = gr.Textbox(label='fit-target', value=shared.args.fit_target, info='Target VRAM margin per device for auto GPU layers (MiB). Comma-separated list for multiple devices.')
                                 shared.gradio['tensor_split'] = gr.Textbox(label='tensor_split', info='List of proportions to split the model across multiple GPUs. Example: 60,40')
                                 shared.gradio['extra_flags'] = gr.Textbox(label='extra-flags', info='Extra flags to pass to llama-server. Example: --jinja --rpc 192.168.1.100:50052', value=shared.args.extra_flags)
                                 shared.gradio['cpu_memory'] = gr.Number(label="Maximum CPU memory in GiB. Use this for CPU offloading.", value=shared.args.cpu_memory)
@@ -152,7 +178,6 @@ def create_ui():
                                 shared.gradio['cpu'] = gr.Checkbox(label="cpu", value=shared.args.cpu, info='Use PyTorch in CPU mode.')
                                 shared.gradio['disk'] = gr.Checkbox(label="disk", value=shared.args.disk)
                                 shared.gradio['cpu_moe'] = gr.Checkbox(label="cpu-moe", value=shared.args.cpu_moe, info='Move the experts to the CPU. Saves VRAM on MoE models.')
-                                shared.gradio['row_split'] = gr.Checkbox(label="row_split", value=shared.args.row_split, info='Split the model by rows across GPUs. This may improve multi-gpu performance.')
                                 shared.gradio['no_kv_offload'] = gr.Checkbox(label="no_kv_offload", value=shared.args.no_kv_offload, info='Do not offload the K, Q, V to the GPU. This saves VRAM but reduces performance.')
                                 shared.gradio['no_mmap'] = gr.Checkbox(label="no-mmap", value=shared.args.no_mmap)
                                 shared.gradio['mlock'] = gr.Checkbox(label="mlock", value=shared.args.mlock)
@@ -191,21 +216,28 @@ def create_event_handlers():
     if mu:
         return
 
-    shared.gradio['loader'].change(loaders.make_loader_params_visible, gradio('loader'), gradio(loaders.get_all_params()), show_progress=False)
+    shared.gradio['loader'].change(
+        loaders.make_loader_params_visible, gradio('loader'), gradio(loaders.get_all_params()), show_progress=False
+    ).then(
+        loader_spec_overlay,
+        gradio('loader', 'spec_type'),
+        gradio(*SPEC_TYPE_OUTPUTS),
+        show_progress=False
+    )
 
     # In this event handler, the interface state is read and updated
     # with the model defaults (if any), and then the model is loaded
     shared.gradio['model_menu'].change(
         ui.gather_interface_values, gradio(shared.input_elements), gradio('interface_state')).then(
-        handle_load_model_event_initial, gradio('model_menu', 'interface_state'), gradio(ui.list_interface_input_elements()) + gradio('interface_state') + gradio('vram_info'), show_progress=False).then(
+        handle_load_model_event_initial, gradio('model_menu', 'interface_state'), gradio(ui.list_interface_input_elements()) + gradio('interface_state') + gradio('vram_info') + gradio('jinja_controls_separator'), show_progress=False).then(
         partial(load_model_wrapper, autoload=False), gradio('model_menu', 'loader'), gradio('model_status'), show_progress=True).success(
-        handle_load_model_event_final, gradio('truncation_length', 'loader', 'interface_state'), gradio('truncation_length', 'filter_by_loader'), show_progress=False)
+        handle_load_model_event_final, gradio('truncation_length', 'loader', 'interface_state'), gradio('truncation_length', 'filter_by_loader', 'jinja_controls_separator', 'reasoning_effort', 'enable_thinking', 'preserve_thinking'), show_progress=False)
 
     shared.gradio['load_model'].click(
         ui.gather_interface_values, gradio(shared.input_elements), gradio('interface_state')).then(
         update_model_parameters, gradio('interface_state'), None).then(
         partial(load_model_wrapper, autoload=True), gradio('model_menu', 'loader'), gradio('model_status'), show_progress=True).success(
-        handle_load_model_event_final, gradio('truncation_length', 'loader', 'interface_state'), gradio('truncation_length', 'filter_by_loader'), show_progress=False)
+        handle_load_model_event_final, gradio('truncation_length', 'loader', 'interface_state'), gradio('truncation_length', 'filter_by_loader', 'jinja_controls_separator', 'reasoning_effort', 'enable_thinking', 'preserve_thinking'), show_progress=False)
 
     shared.gradio['unload_model'].click(handle_unload_model_click, None, gradio('model_status'), show_progress=False).then(
         update_gpu_layers_and_vram, gradio('loader', 'model_menu', 'gpu_layers', 'ctx_size', 'cache_type'), gradio('vram_info'), show_progress=False)
@@ -231,9 +263,9 @@ def create_event_handlers():
         shared.gradio['lora_menu_apply'].click(load_lora_wrapper, gradio('lora_menu'), gradio('model_status'), show_progress=False)
 
     shared.gradio['spec_type'].change(
-        lambda x: [gr.update(visible=x != 'none')] * 3,
+        spec_type_visibility_updates,
         gradio('spec_type'),
-        gradio('spec_ngram_size_n', 'spec_ngram_size_m', 'spec_ngram_min_hits'),
+        gradio(*SPEC_TYPE_OUTPUTS),
         show_progress=False
     )
 
@@ -282,8 +314,27 @@ def download_model_wrapper(repo_id, specific_file, progress=gr.Progress(), retur
     downloader_module = importlib.import_module("download-model")
     downloader = downloader_module.ModelDownloader()
     update_queue = queue.Queue()
+    branch = None
 
     try:
+        # Handle branch in URL
+        if "/tree/" in repo_id:
+            try:
+                repo_id, branch = repo_id.split("/tree/")
+            except Exception as e:
+                yield f"Error parsing branch from URL: {e}"
+                progress(0.0)
+                return
+
+        # Handle branch delimited by ":"
+        elif not repo_id.startswith("http") and ":" in repo_id:
+            try:
+                repo_id, branch = repo_id.split(":")
+            except Exception as e:
+                yield f"Error parsing branch from repo_id: {e}"
+                progress(0.0)
+                return
+
         # Handle direct GGUF URLs
         if repo_id.startswith("https://") and ("huggingface.co" in repo_id) and (repo_id.endswith(".gguf") or repo_id.endswith(".gguf?download=true")):
             try:
@@ -309,7 +360,7 @@ def download_model_wrapper(repo_id, specific_file, progress=gr.Progress(), retur
 
         progress(0.0, "Preparing download...")
 
-        model, branch = downloader.sanitize_model_and_branch_names(repo_id, None)
+        model, branch = downloader.sanitize_model_and_branch_names(repo_id, branch)
         yield "Getting download links from Hugging Face..."
         links, sha256, is_lora, is_llamacpp, file_sizes = downloader.get_download_links_from_huggingface(model, branch, text_only=False, specific_file=specific_file)
 
@@ -429,11 +480,11 @@ def download_model_wrapper(repo_id, specific_file, progress=gr.Progress(), retur
 def update_truncation_length(current_length, state):
     if 'loader' in state:
         if state['loader'].lower().startswith('exllama') or state['loader'] == 'llama.cpp':
-            if state['ctx_size'] > 0:
-                return state['ctx_size']
-
             # ctx_size == 0 means auto: use the actual value from the server
-            return shared.settings['truncation_length']
+            new_length = state['ctx_size'] if state['ctx_size'] > 0 else shared.settings['truncation_length']
+            if not shared.args.multi_user:
+                shared.persistent_interface_state['truncation_length'] = new_length
+            return new_length
 
     return current_length
 
@@ -464,13 +515,20 @@ def handle_load_model_event_initial(model, state):
     output = ui.apply_interface_values(state)
     update_model_parameters(state)  # This updates the command-line flags
 
+    show_separator, _, _, _ = utils.get_jinja_control_visibility(state.get('instruction_template_str', ''))
+    not_chat = state.get('mode') != 'chat'
+
     vram_info = state.get('vram_info', "<div id=\"vram-info\"'>Estimated VRAM to load the model:</div>")
-    return output + [state] + [vram_info]
+    return output + [state] + [vram_info] + [gr.update(visible=show_separator and not_chat)]
 
 
 def handle_load_model_event_final(truncation_length, loader, state):
     truncation_length = update_truncation_length(truncation_length, state)
-    return [truncation_length, loader]
+
+    show_separator, show_reasoning, show_thinking, show_preserve_thinking = utils.get_jinja_control_visibility(state.get('instruction_template_str', ''))
+    not_chat = state.get('mode') != 'chat'
+
+    return [truncation_length, loader, gr.update(visible=show_separator and not_chat), gr.update(visible=show_reasoning and not_chat), gr.update(visible=show_thinking and not_chat), gr.update(visible=show_preserve_thinking and not_chat)]
 
 
 def handle_unload_model_click():

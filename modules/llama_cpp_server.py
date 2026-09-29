@@ -1,3 +1,4 @@
+import atexit
 import json
 import os
 import pprint
@@ -21,6 +22,7 @@ from modules.image_utils import (
 )
 from modules.logging_colors import logger
 from modules.utils import resolve_model_path
+from modules.windows_subprocess import bind_to_parent_lifetime
 
 llamacpp_valid_cache_types = {"fp16", "q8_0", "q4_0"}
 
@@ -38,6 +40,7 @@ class LlamaServer:
         self.vocabulary_size = None
         self.n_ctx = None
         self.bos_token = "<s>"
+        self.media_marker = "<__media__>"
         self.last_prompt_token_count = 0
 
         # Start the server
@@ -185,6 +188,9 @@ class LlamaServer:
             # Multimodal case
             IMAGE_TOKEN_COST_ESTIMATE = 600  # A safe, conservative estimate per image
 
+            # Translate placeholders to the server's actual media marker.
+            prompt = prompt.replace("<__media__>", self.media_marker)
+
             base64_images = [convert_pil_to_base64(img) for img in pil_images]
             payload["prompt"] = {
                 "prompt_string": prompt,
@@ -217,6 +223,10 @@ class LlamaServer:
             pprint.PrettyPrinter(indent=4, sort_dicts=False).pprint(printable_payload)
             print()
 
+        full_text = ""
+        self.last_completion_probabilities = []
+        self.last_completion_token_count = 0
+
         # Make the generation request
         response = self.session.post(url, json=payload, stream=True)
         try:
@@ -225,9 +235,6 @@ class LlamaServer:
                 return
             else:
                 response.raise_for_status()  # Raise an exception for HTTP errors
-
-            full_text = ""
-            self.last_completion_probabilities = []
 
             # Process the streaming response
             stop_event = state.get('stop_event')
@@ -251,14 +258,16 @@ class LlamaServer:
                     # Extract the token content
                     if data.get('content', ''):
                         full_text += data['content']
+                        self.last_completion_token_count += 1
                         yield full_text
 
                     # Capture logprobs if present
                     if 'completion_probabilities' in data:
                         self.last_completion_probabilities.extend(data['completion_probabilities'])
 
-                    # Check if generation is complete
                     if data.get('stop', False):
+                        # Server count includes speculative-decode tokens our per-chunk counter misses.
+                        self.last_completion_token_count = data.get('tokens_predicted', self.last_completion_token_count)
                         break
 
                 except json.JSONDecodeError as e:
@@ -376,6 +385,12 @@ class LlamaServer:
         if n_ctx:
             self.n_ctx = n_ctx
 
+        # Get the server's media marker for multimodal support.
+        # llama.cpp server generates a random marker each restart;
+        # we must use it instead of the default <__media__>.
+        if "media_marker" in response:
+            self.media_marker = response["media_marker"]
+
     def _is_port_available(self, port):
         """Check if a port is available for use."""
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -423,6 +438,9 @@ class LlamaServer:
             "--flash-attn", "on",
         ]
 
+        if shared.args.ctx_size < 0:
+            shared.args.ctx_size = 0
+
         if shared.args.ctx_size > 0:
             cmd += ["--ctx-size", str(shared.args.ctx_size)]
         elif shared.args.gpu_layers >= 0:
@@ -452,8 +470,8 @@ class LlamaServer:
             cmd += ["--numa", "distribute"]
         if shared.args.no_kv_offload:
             cmd.append("--no-kv-offload")
-        if shared.args.row_split:
-            cmd += ["--split-mode", "row"]
+        if shared.args.split_mode != "layer":
+            cmd += ["--split-mode", shared.args.split_mode]
         cache_type = "fp16"
         if shared.args.cache_type != "fp16" and shared.args.cache_type in llamacpp_valid_cache_types:
             cmd += ["--cache-type-k", shared.args.cache_type, "--cache-type-v", shared.args.cache_type]
@@ -461,11 +479,19 @@ class LlamaServer:
         if shared.args.mmproj not in [None, 'None']:
             path = Path(shared.args.mmproj)
             if not path.exists():
-                path = shared.user_data_dir / 'mmproj' / shared.args.mmproj
+                alt = shared.user_data_dir / 'mmproj' / shared.args.mmproj
+                if alt.exists():
+                    path = alt
+                else:
+                    path = Path(shared.args.model_dir) / shared.args.mmproj
 
             if path.exists():
                 cmd += ["--mmproj", str(path)]
-        if shared.args.model_draft not in [None, 'None']:
+        spec_type = shared.args.spec_type
+        model_draft_set = shared.args.model_draft not in [None, 'None']
+        uses_draft_model_flags = spec_type in ('none', 'draft-mtp') and model_draft_set
+        uses_draft_max = uses_draft_model_flags or spec_type == 'draft-mtp'
+        if uses_draft_model_flags:
             path = resolve_model_path(shared.args.model_draft)
 
             if path.is_file():
@@ -474,20 +500,22 @@ class LlamaServer:
                 model_file = sorted(path.glob('*.gguf'))[0]
 
             cmd += ["--model-draft", str(model_file)]
-            if shared.args.draft_max > 0:
-                cmd += ["--draft-max", str(shared.args.draft_max)]
             if shared.args.gpu_layers_draft > 0:
                 cmd += ["--gpu-layers-draft", str(shared.args.gpu_layers_draft)]
             if shared.args.device_draft:
                 cmd += ["--device-draft", shared.args.device_draft]
-            if shared.args.ctx_size_draft > 0:
-                cmd += ["--ctx-size-draft", str(shared.args.ctx_size_draft)]
-        if shared.args.spec_type != 'none':
-            cmd += ["--spec-type", shared.args.spec_type]
-            cmd += ["--draft-max", str(shared.args.draft_max)]
-            cmd += ["--spec-ngram-size-n", str(shared.args.spec_ngram_size_n)]
-            cmd += ["--spec-ngram-size-m", str(shared.args.spec_ngram_size_m)]
-            cmd += ["--spec-ngram-min-hits", str(shared.args.spec_ngram_min_hits)]
+        if uses_draft_max and shared.args.draft_max > 0:
+            cmd += ["--spec-draft-n-max", str(shared.args.draft_max)]
+        if spec_type != 'none':
+            cmd += ["--spec-type", spec_type]
+            if spec_type == 'ngram-mod':
+                cmd += ["--spec-ngram-mod-n-match", str(shared.args.spec_ngram_size_n)]
+                cmd += ["--spec-ngram-mod-n-min", str(shared.args.spec_ngram_size_m)]
+            elif spec_type in ('ngram-simple', 'ngram-map-k', 'ngram-map-k4v'):
+                prefix = f"--spec-{spec_type}"
+                cmd += [f"{prefix}-size-n", str(shared.args.spec_ngram_size_n)]
+                cmd += [f"{prefix}-size-m", str(shared.args.spec_ngram_size_m)]
+                cmd += [f"{prefix}-min-hits", str(shared.args.spec_ngram_min_hits)]
         cmd += ["--parallel", str(shared.args.parallel)]
         if shared.args.streaming_llm:
             cmd += ["--cache-reuse", "1"]
@@ -550,6 +578,8 @@ class LlamaServer:
             bufsize=0,
             env=env
         )
+        bind_to_parent_lifetime(self.process.pid)
+        atexit.register(self.stop)
 
         threading.Thread(target=filter_stderr_with_progress, args=(self.process.stderr,), daemon=True).start()
 
@@ -589,6 +619,7 @@ class LlamaServer:
 
     def stop(self):
         """Stop the server process."""
+        atexit.unregister(self.stop)
         if self.process:
             self.process.terminate()
             try:
@@ -676,6 +707,7 @@ def _patch_cmd_for_ik(cmd):
       --cache-reuse        → (removed, unsupported)
       --swa-full           → (removed, unsupported)
       --split-mode row     → --split-mode graph
+      --split-mode tensor  → --split-mode graph
     """
     # Add Hadamard KV cache rotation when using quantized cache types.
     # This significantly improves quantized cache quality (especially q4_0)
@@ -703,7 +735,7 @@ def _patch_cmd_for_ik(cmd):
             patched.append("--fit-margin")
         elif arg == "--cache-reuse":
             i += 1  # skip the value
-        elif arg == "--split-mode" and i + 1 < len(cmd) and cmd[i + 1] == "row":
+        elif arg == "--split-mode" and i + 1 < len(cmd) and cmd[i + 1] in ("row", "tensor"):
             patched += ["--split-mode", "graph"]
             i += 1  # skip the value
         elif arg == "--swa-full":

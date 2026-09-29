@@ -6,7 +6,7 @@ from pathlib import Path
 
 import yaml
 
-from modules import loaders, metadata_gguf, shared
+from modules import loaders, metadata_gguf, shared, utils
 from modules.logging_colors import logger
 from modules.utils import resolve_model_path
 
@@ -69,6 +69,8 @@ def get_model_metadata(model):
             elif k.endswith('.block_count'):
                 model_settings['gpu_layers'] = -1
                 model_settings['max_gpu_layers'] = metadata[k] + 1
+            elif k.endswith('.nextn_predict_layers') and metadata[k] > 0:
+                model_settings['spec_type'] = 'draft-mtp'
 
         if 'tokenizer.chat_template' in metadata:
             template = metadata['tokenizer.chat_template']
@@ -234,6 +236,22 @@ def apply_model_settings_to_state(model, state):
         if k in state and k != 'gpu_layers':  # Skip gpu_layers, handle separately
             state[k] = model_settings[k]
 
+    if state.get('spec_type') == 'draft-mtp' and model_settings.get('spec_type') != 'draft-mtp':
+        state['spec_type'] = 'none'
+
+    # Auto-detect a sibling mmproj when the user hasn't saved one for this model.
+    # Bare filenames (from user_data/mmproj/) persist across model switches;
+    # subfolder paths only persist while the new model lives in the same folder.
+    if state.get('loader') == 'llama.cpp' and 'mmproj' not in model_settings:
+        sibling = utils.find_sibling_mmproj(resolve_model_path(model))
+        if sibling:
+            state['mmproj'] = sibling
+        else:
+            current = state.get('mmproj')
+            if current and current != 'None' and ('/' in current or '\\' in current):
+                if Path(current).parent != Path(model).parent:
+                    state['mmproj'] = 'None'
+
     # Handle GPU layers and VRAM update for llama.cpp
     if state['loader'] == 'llama.cpp' and 'gpu_layers' in model_settings:
         gpu_layers = model_settings['gpu_layers']  # -1 (auto) by default, or user-saved value
@@ -397,28 +415,56 @@ def update_gpu_layers_and_vram(loader, model, gpu_layers, ctx_size, cache_type):
     return f"<div id=\"vram-info\"'>Estimated VRAM to load the model: <span class=\"value\">{vram_usage:.0f} MiB</span></div>"
 
 
+def load_template_by_name(name):
+    """Find and load a single instruction template by name. Returns '' if not found."""
+    # Prevent path traversal: strip all directory components, keep only the filename
+    name = Path(name).name
+    if not name:
+        return ''
+
+    template_dir = shared.user_data_dir / 'instruction-templates'
+    for ext in utils.TEMPLATE_EXTENSIONS:
+        path = template_dir / f'{name}{ext}'
+        if path.is_file():
+            break
+    else:
+        return ''
+
+    # Defense-in-depth: confirm resolved path stays inside template_dir
+    try:
+        path.resolve().relative_to(template_dir.resolve())
+    except ValueError:
+        logger.error(f'Path traversal blocked for instruction template name: {name!r}')
+        return ''
+
+    file_contents = path.read_text(encoding='utf-8')
+    if path.suffix in utils.JINJA_EXTENSIONS:
+        return file_contents
+
+    try:
+        data = yaml.safe_load(file_contents) or {}
+    except yaml.YAMLError:
+        logger.warning(f"Failed to parse '{path.name}' as YAML. Treating it as a raw Jinja template. Consider renaming it to '{name}.jinja'.")
+        return file_contents
+
+    if 'instruction_template' in data:
+        return data['instruction_template']
+    elif 'turn_template' in data:
+        return _jinja_template_from_old_format(data)
+    else:
+        return ''
+
+
 def load_instruction_template(template):
     if template == 'None':
         return ''
 
-    for name in (template, 'Alpaca'):
-        path = shared.user_data_dir / 'instruction-templates' / f'{name}.yaml'
-        try:
-            with open(path, 'r', encoding='utf-8') as f:
-                file_contents = f.read()
-        except FileNotFoundError:
-            if name == template:
-                logger.warning(f"Instruction template '{template}' not found, falling back to Alpaca")
-            continue
+    result = load_template_by_name(template)
+    if result:
+        return result
 
-        break
-    else:
-        return ''
-    data = yaml.safe_load(file_contents)
-    if 'instruction_template' in data:
-        return data['instruction_template']
-    else:
-        return _jinja_template_from_old_format(data)
+    logger.warning(f"Instruction template '{template}' not found, falling back to Alpaca")
+    return load_template_by_name('Alpaca')
 
 
 def _jinja_template_from_old_format(params, verbose=False):

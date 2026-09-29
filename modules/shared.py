@@ -40,6 +40,7 @@ processing_message = ''
 gradio = {}
 persistent_interface_state = {}
 need_restart = False
+is_electron = os.environ.get('TEXTGEN_ELECTRON') == '1'
 
 # Parser copied from https://github.com/vladmandic/automatic
 parser = argparse.ArgumentParser(description="TextGen", conflict_handler='resolve', add_help=True, formatter_class=lambda prog: argparse.HelpFormatter(prog, max_help_position=55, indent_increment=2, width=200))
@@ -82,11 +83,11 @@ group.add_argument('--cache-type', '--cache_type', type=str, default='fp16', met
 # Speculative decoding
 group = parser.add_argument_group('Speculative decoding')
 group.add_argument('--model-draft', type=str, default=None, help='Path to the draft model for speculative decoding.')
-group.add_argument('--draft-max', type=int, default=4, help='Number of tokens to draft for speculative decoding.')
+group.add_argument('--draft-max', type=int, default=3, help='Number of tokens to draft for speculative decoding.')
 group.add_argument('--gpu-layers-draft', type=int, default=256, help='Number of layers to offload to the GPU for the draft model.')
 group.add_argument('--device-draft', type=str, default=None, help='Comma-separated list of devices to use for offloading the draft model. Example: CUDA0,CUDA1')
 group.add_argument('--ctx-size-draft', type=int, default=0, help='Size of the prompt context for the draft model. If 0, uses the same as the main model.')
-group.add_argument('--spec-type', type=str, default='none', choices=['none', 'ngram-mod', 'ngram-simple', 'ngram-map-k', 'ngram-map-k4v', 'ngram-cache'], help='Draftless speculative decoding type. Recommended: ngram-mod.')
+group.add_argument('--spec-type', type=str, default='none', choices=['none', 'draft-mtp', 'ngram-mod', 'ngram-simple', 'ngram-map-k', 'ngram-map-k4v'], help='Speculative decoding type. Recommended: draft-mtp if the main model is an MTP build, otherwise ngram-mod.')
 group.add_argument('--spec-ngram-size-n', type=int, default=24, help='N-gram lookup size for ngram speculative decoding.')
 group.add_argument('--spec-ngram-size-m', type=int, default=48, help='Draft n-gram size for ngram speculative decoding.')
 group.add_argument('--spec-ngram-min-hits', type=int, default=1, help='Minimum n-gram hits for ngram-map speculative decoding.')
@@ -98,7 +99,7 @@ group.add_argument('--cpu-moe', action='store_true', help='Move the experts to t
 group.add_argument('--mmproj', type=str, default=None, help='Path to the mmproj file for vision models.')
 group.add_argument('--streaming-llm', action='store_true', help='Activate StreamingLLM to avoid re-evaluating the entire prompt when old messages are removed.')
 group.add_argument('--tensor-split', type=str, default=None, help='Split the model across multiple GPUs. Comma-separated list of proportions. Example: 60,40.')
-group.add_argument('--row-split', action='store_true', help='Split the model by rows across GPUs. This may improve multi-gpu performance.')
+group.add_argument('--split-mode', type=str, default='layer', choices=['layer', 'row', 'tensor', 'none'], help='How to split the model across multiple GPUs. "tensor" can make multi-GPU significantly faster.')
 group.add_argument('--no-mmap', action='store_true', help='Prevent mmap from being used.')
 group.add_argument('--mlock', action='store_true', help='Force the system to keep the model in RAM.')
 group.add_argument('--no-kv-offload', action='store_true', help='Do not offload the K, Q, V to the GPU. This saves VRAM but reduces performance.')
@@ -210,7 +211,12 @@ group.add_argument('--sampler-priority', type=str, default=_d['sampler_priority'
 group.add_argument('--dry-sequence-breakers', type=str, default=_d['dry_sequence_breakers'], metavar='N', help='DRY sequence breakers')
 group.add_argument('--enable-thinking', action=argparse.BooleanOptionalAction, default=True, help='Enable thinking')
 group.add_argument('--reasoning-effort', type=str, default='medium', metavar='N', help='Reasoning effort')
+group.add_argument('--preserve-thinking', action=argparse.BooleanOptionalAction, default=False, help='Preserve thinking blocks from prior turns in the chat template')
 group.add_argument('--chat-template-file', type=str, default=None, help='Path to a chat template file (.jinja, .jinja2, or .yaml) to use as the default instruction template for API requests. Overrides the model\'s built-in template.')
+
+# Electron
+group = parser.add_argument_group('Electron')
+group.add_argument('--no-electron', action='store_true', help='In portable builds, skip the Electron desktop window. Useful if you prefer to use the web UI in the browser.')
 
 # Handle CMD_FLAGS.txt
 cmd_flags_path = user_data_dir / "CMD_FLAGS.txt"
@@ -260,6 +266,7 @@ settings = {
     'web_search_pages': 3,
     'selected_tools': [],
     'mcp_servers': '',
+    'confirm_tool_calls': False,
     'prompt-notebook': '',
     'preset': 'Top-P' if (user_data_dir / 'presets/Top-P.yaml').exists() else None,
     'max_new_tokens': 512,
@@ -272,6 +279,7 @@ settings = {
     'add_bos_token': True,
     'enable_thinking': True,
     'reasoning_effort': 'medium',
+    'preserve_thinking': False,
     'skip_special_tokens': True,
     'stream': True,
     'static_cache': False,
@@ -284,6 +292,7 @@ settings = {
     'show_two_notebook_columns': False,
     'paste_to_attachment': False,
     'include_past_attachments': True,
+    'spellcheck': False,
 
     # Generation parameters - Curve shape
     'temperature': neutral_samplers['temperature'],

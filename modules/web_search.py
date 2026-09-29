@@ -1,14 +1,12 @@
 import concurrent.futures
-import html
 import ipaddress
-import random
-import re
 import socket
 from concurrent.futures import as_completed
 from datetime import datetime
-from urllib.parse import parse_qs, quote_plus, urljoin, urlparse
+from urllib.parse import urljoin, urlparse
 
 import requests
+from ddgs import DDGS
 
 from modules import shared
 from modules.logging_colors import logger
@@ -16,9 +14,17 @@ from modules.logging_colors import logger
 
 def _validate_url(url):
     """Validate that a URL is safe to fetch (not targeting private/internal networks)."""
+    # Reject characters that cause parsing discrepancies between urlparse and requests,
+    # which can be exploited to bypass SSRF protections (GHSA-27xf-58m5-vxmc).
+    if '\\' in url:
+        raise ValueError("Invalid URL: backslashes are not allowed")
+
     parsed = urlparse(url)
     if parsed.scheme not in ('http', 'https'):
         raise ValueError(f"Unsupported URL scheme: {parsed.scheme}")
+
+    if '@' in parsed.netloc:
+        raise ValueError("Invalid URL: userinfo (credentials) in URLs is not allowed")
 
     hostname = parsed.hostname
     if not hostname:
@@ -34,6 +40,20 @@ def _validate_url(url):
         raise ValueError(f"Could not resolve hostname: {hostname}")
 
 
+def safe_get(url, headers=None, timeout=10, max_redirects=5):
+    """Fetch a URL with SSRF-safe redirect handling. Validates every hop."""
+    _validate_url(url)
+    for _ in range(max_redirects):
+        response = requests.get(url, headers=headers, timeout=timeout, allow_redirects=False)
+        if response.is_redirect and 'Location' in response.headers:
+            url = urljoin(url, response.headers['Location'])
+            _validate_url(url)
+        else:
+            return response
+
+    raise ValueError(f"Too many redirects (max {max_redirects})")
+
+
 def get_current_timestamp():
     """Returns the current time in 24-hour format"""
     return datetime.now().strftime('%b %d, %Y %H:%M')
@@ -46,19 +66,10 @@ def download_web_page(url, timeout=10, include_links=False):
     import trafilatura
 
     try:
-        _validate_url(url)
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36'
         }
-        max_redirects = 5
-        for _ in range(max_redirects):
-            response = requests.get(url, headers=headers, timeout=timeout, allow_redirects=False)
-            if response.is_redirect and 'Location' in response.headers:
-                url = urljoin(url, response.headers['Location'])
-                _validate_url(url)
-            else:
-                break
-
+        response = safe_get(url, headers=headers, timeout=timeout)
         response.raise_for_status()
 
         result = trafilatura.extract(
@@ -76,75 +87,31 @@ def download_web_page(url, timeout=10, include_links=False):
         return ""
 
 
-def perform_web_search(query, num_pages=3, max_workers=5, timeout=10, fetch_content=True):
+def perform_web_search(query, num_pages=3, max_workers=5, fetch_content=True):
     """Perform web search and return results, optionally with page content"""
     try:
-        search_url = f"https://html.duckduckgo.com/html/?q={quote_plus(query)}"
+        kwargs = {'max_results': num_pages} if num_pages is not None else {}
+        results = DDGS().text(query, **kwargs)
 
-        agents = [
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
+        search_results = [
+            {'title': r['title'], 'url': r['href'], 'snippet': r.get('body', ''), 'content': ''}
+            for r in results
         ]
 
-        response = requests.get(search_url, headers={'User-Agent': random.choice(agents)}, timeout=timeout)
-        response.raise_for_status()
-        response_text = response.text
-
-        # Extract results - title and URL come from the same <a class="result__a"> element
-        result_links = re.findall(r'<a[^>]*class="[^"]*result__a[^"]*"[^>]*>(.*?)</a>', response_text, re.DOTALL)
-        result_tags = re.findall(r'<a([^>]*class="[^"]*result__a[^"]*"[^>]*)>', response_text, re.DOTALL)
-
-        # Prepare download tasks
-        download_tasks = []
-        for i, (tag_attrs, raw_title) in enumerate(zip(result_tags, result_links)):
-            if num_pages is not None and i >= num_pages:
-                break
-            # Extract href and resolve the actual URL from DuckDuckGo's redirect link
-            href_match = re.search(r'href="([^"]*)"', tag_attrs)
-            if not href_match:
-                continue
-            uddg = parse_qs(urlparse(html.unescape(href_match.group(1))).query).get('uddg', [''])[0]
-            if not uddg:
-                continue
-            title = html.unescape(re.sub(r'<[^>]+>', '', raw_title).strip())
-            download_tasks.append((uddg, title, len(download_tasks)))
-
-        search_results = [None] * len(download_tasks)  # Pre-allocate to maintain order
-
         if not fetch_content:
-            for url, title, index in download_tasks:
-                search_results[index] = {
-                    'title': title,
-                    'url': url,
-                    'content': ''
-                }
-
             return search_results
 
-        # Download pages in parallel
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # Submit all download tasks
-            future_to_task = {
-                executor.submit(download_web_page, task[0]): task
-                for task in download_tasks
+            future_to_index = {
+                executor.submit(download_web_page, r['url']): i
+                for i, r in enumerate(search_results)
             }
-
-            # Collect results as they complete
-            for future in as_completed(future_to_task):
-                url, title, index = future_to_task[future]
+            for future in as_completed(future_to_index):
+                i = future_to_index[future]
                 try:
-                    content = future.result()
-                    search_results[index] = {
-                        'title': title,
-                        'url': url,
-                        'content': content
-                    }
-                except Exception:
-                    search_results[index] = {
-                        'title': title,
-                        'url': url,
-                        'content': ''
-                    }
+                    search_results[i]['content'] = future.result()
+                except Exception as e:
+                    logger.error(f"Error fetching {search_results[i]['url']}: {e}")
 
         return search_results
 

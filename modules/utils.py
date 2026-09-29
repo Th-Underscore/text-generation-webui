@@ -28,10 +28,11 @@ def sanitize_filename(name):
 
 def _is_path_allowed(abs_path_str):
     """Check if a path is under the configured user_data directory."""
-    abs_path = Path(abs_path_str).resolve()
-    user_data_resolved = shared.user_data_dir.resolve()
+    # normpath (not resolve) preserves symlinks so a symlinked user_data/logs works.
+    abs_path = Path(os.path.normpath(os.path.abspath(abs_path_str)))
+    user_data_base = Path(os.path.normpath(os.path.abspath(shared.user_data_dir)))
     try:
-        abs_path.relative_to(user_data_resolved)
+        abs_path.relative_to(user_data_base)
         return True
     except ValueError:
         return False
@@ -194,7 +195,8 @@ def get_available_ggufs():
 
     for dirpath, _, files in os.walk(model_dir, followlinks=True):
         for file in files:
-            if file.lower().endswith(".gguf"):
+            lower = file.lower()
+            if lower.endswith(".gguf") and not lower.startswith("mmproj"):
                 model_path = Path(dirpath) / file
                 rel_path = model_path.relative_to(model_dir)
                 model_list.append(str(rel_path))
@@ -202,17 +204,53 @@ def get_available_ggufs():
     return sorted(model_list, key=natural_keys)
 
 
+def is_mmproj_file(name):
+    lower = name.lower()
+    return lower.startswith('mmproj') and lower.endswith(('.gguf', '.bin'))
+
+
+def find_sibling_mmproj(model_path):
+    """Return an mmproj path relative to model_dir when exactly one mmproj file
+    sits in the same folder as the model, provided that folder is a subfolder
+    of model_dir (not model_dir itself).
+    """
+    try:
+        model_path = Path(model_path)
+        model_root = Path(shared.args.model_dir).resolve()
+        parent = model_path.parent.resolve()
+        if parent == model_root or model_root not in parent.parents:
+            return None
+
+        mmproj_candidates = [
+            entry for entry in parent.iterdir()
+            if entry.is_file() and is_mmproj_file(entry.name)
+        ]
+    except OSError:
+        return None
+
+    if len(mmproj_candidates) == 1:
+        return str(mmproj_candidates[0].relative_to(model_root))
+    return None
+
+
 def get_available_mmproj():
-    mmproj_dir = shared.user_data_dir / 'mmproj'
-    if not mmproj_dir.exists():
-        return ['None']
-
     mmproj_files = []
-    for item in mmproj_dir.iterdir():
-        if item.is_file() and item.suffix.lower() in ('.gguf', '.bin'):
-            mmproj_files.append(item.name)
 
-    return ['None'] + sorted(mmproj_files, key=natural_keys)
+    mmproj_dir = shared.user_data_dir / 'mmproj'
+    if mmproj_dir.exists():
+        for item in mmproj_dir.iterdir():
+            if item.is_file() and item.suffix.lower() in ('.gguf', '.bin'):
+                mmproj_files.append(item.name)
+
+    model_dir = Path(shared.args.model_dir)
+    if model_dir.exists():
+        for dirpath, _, files in os.walk(model_dir, followlinks=True):
+            for file in files:
+                if is_mmproj_file(file):
+                    rel_path = str((Path(dirpath) / file).relative_to(model_dir))
+                    mmproj_files.append(rel_path)
+
+    return ['None'] + sorted(set(mmproj_files), key=natural_keys)
 
 
 def get_available_presets():
@@ -247,11 +285,16 @@ def get_available_users():
     return sorted(set((k.stem for k in paths)), key=natural_keys)
 
 
+YAML_EXTENSIONS = ('.yaml', '.yml')
+JINJA_EXTENSIONS = ('.jinja', '.jinja2')
+TEMPLATE_EXTENSIONS = JINJA_EXTENSIONS + YAML_EXTENSIONS
+
+
 def get_available_instruction_templates():
-    path = str(shared.user_data_dir / "instruction-templates")
+    path = shared.user_data_dir / "instruction-templates"
     paths = []
-    if os.path.exists(path):
-        paths = (x for x in Path(path).iterdir() if x.suffix in ('.json', '.yaml', '.yml'))
+    if path.exists():
+        paths = (x for x in path.iterdir() if x.suffix in TEMPLATE_EXTENSIONS)
 
     return ['None'] + sorted(set((k.stem for k in paths)), key=natural_keys)
 
@@ -349,3 +392,14 @@ def get_available_chat_styles():
 
 def get_available_grammars():
     return ['None'] + sorted([item.name for item in list((shared.user_data_dir / 'grammars').glob('*.gbnf'))], key=natural_keys)
+
+
+def get_jinja_control_visibility(template_str):
+    if shared.model_name == 'None':
+        return True, True, True, True
+
+    show_reasoning = 'reasoning_effort' in template_str
+    show_thinking = 'enable_thinking' in template_str or 'thinking_budget' in template_str
+    show_preserve_thinking = 'preserve_thinking' in template_str
+    show_separator = show_reasoning or show_thinking or show_preserve_thinking
+    return show_separator, show_reasoning, show_thinking, show_preserve_thinking

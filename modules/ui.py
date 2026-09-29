@@ -43,12 +43,10 @@ with open(Path(__file__).resolve().parent / '../js/update_big_picture.js', 'r', 
 with open(Path(__file__).resolve().parent / '../js/dark_theme.js', 'r', encoding='utf-8') as f:
     dark_theme_js = f.read()
 
-refresh_symbol = '🔄'
-delete_symbol = '🗑️'
-save_symbol = '💾'
+refresh_symbol = '↻'  # a11y label; visible glyph swapped via CSS .refresh-icon-btn
 
 theme = gr.themes.Default(
-    font=['Noto Sans', 'Helvetica', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+    font=['Inter', 'Noto Sans', 'Helvetica', 'ui-sans-serif', 'system-ui', 'sans-serif'],
     font_mono=['IBM Plex Mono', 'ui-monospace', 'Consolas', 'monospace'],
 ).set(
     border_color_primary='#c5c5d2',
@@ -66,7 +64,7 @@ theme = gr.themes.Default(
 if not shared.args.old_colors:
     theme = theme.set(
         # General Colors
-        border_color_primary='#d2d2d8',
+        border_color_primary='rgba(0, 0, 0, 0.15)',
         block_border_color='transparent',
         body_text_color_subdued='#484848',
         background_fill_secondary='#eaeaea',
@@ -79,10 +77,10 @@ if not shared.args.old_colors:
         button_secondary_background_fill="white",
         button_secondary_border_color="var(--border-color-primary)",
         block_title_text_color='*body_text_color',
-        button_primary_background_fill='#374151',
-        button_primary_background_fill_hover='#4b5563',
-        button_primary_background_fill_hover_dark='rgba(255, 255, 255, 0.05)',
-        button_primary_border_color='#374151',
+        button_primary_background_fill='var(--accent, #4a72ff)',
+        button_primary_background_fill_hover='#3556cc',
+        button_primary_border_color='var(--accent, #4a72ff)',
+        button_primary_border_color_hover='#3556cc',
         button_primary_text_color='white',
         input_shadow="none",
         button_shadow_hover="none",
@@ -99,6 +97,10 @@ if not shared.args.old_colors:
         button_secondary_border_color_dark='var(--border-color-dark)',
         body_background_fill_dark='var(--dark-gray, #212125)',
         button_primary_background_fill_dark='transparent',
+        button_primary_background_fill_hover_dark='rgba(74, 114, 255, 0.12)',
+        button_primary_border_color_dark='#4a72ffc4',
+        button_primary_border_color_hover_dark='#4a72ff',
+        button_primary_text_color_dark='white',
         button_secondary_background_fill_dark='transparent',
         checkbox_label_background_fill_dark='transparent',
         button_cancel_background_fill_dark='transparent',
@@ -179,6 +181,7 @@ def list_interface_input_elements():
         'add_bos_token',
         'enable_thinking',
         'reasoning_effort',
+        'preserve_thinking',
         'skip_special_tokens',
         'stream',
         'static_cache',
@@ -210,6 +213,7 @@ def list_interface_input_elements():
         'start_with',
         'selected_tools',
         'mcp_servers',
+        'confirm_tool_calls',
         'mode',
         'chat_style',
         'chat-instruct_command',
@@ -243,6 +247,9 @@ def list_interface_input_elements():
         'paste_to_attachment',
         'include_past_attachments',
     ]
+
+    if shared.is_electron:
+        elements += ['model_dir', 'spellcheck']
 
     if not shared.args.portable:
         # Image generation elements
@@ -334,9 +341,9 @@ def save_settings(state, preset, extensions_list, show_controls, theme_state, ma
         output['default_extensions'] = extensions_list
 
         for extension_name in extensions_list:
-            extension = getattr(extensions, extension_name, None)
-            if extension:
-                extension = extension.script
+            state_entry = extensions_module.state.get(extension_name)
+            if state_entry:
+                extension = state_entry[2]
                 if hasattr(extension, 'params'):
                     params = getattr(extension, 'params')
                     for param in params:
@@ -436,6 +443,7 @@ def setup_auto_save():
         'chat_template_str',
         'selected_tools',
         'mcp_servers',
+        'confirm_tool_calls',
 
         # Parameters tab (ui_parameters.py) - Generation parameters
         'preset_menu',
@@ -483,6 +491,7 @@ def setup_auto_save():
         'add_bos_token',
         'enable_thinking',
         'reasoning_effort',
+        'preserve_thinking',
         'skip_special_tokens',
         'stream',
         'static_cache',
@@ -508,6 +517,9 @@ def setup_auto_save():
         'include_past_attachments',
 
     ]
+
+    if shared.is_electron:
+        change_elements += ['model_dir', 'spellcheck']
 
     if not shared.args.portable:
         # Image generation tab (ui_image_generation.py)
@@ -539,7 +551,7 @@ def setup_auto_save():
                 store_current_state_and_debounce, gradio('interface_state', 'preset_menu', 'extensions_menu', 'show_controls', 'theme_state'), None, show_progress=False)
 
 
-def create_refresh_button(refresh_component, refresh_method, refreshed_args, elem_class, interactive=True):
+def create_refresh_button(refresh_component, refresh_method, refreshed_args, elem_class, interactive=True, visible=True):
     """
     Copied from https://github.com/AUTOMATIC1111/stable-diffusion-webui
     """
@@ -549,7 +561,10 @@ def create_refresh_button(refresh_component, refresh_method, refreshed_args, ele
 
         return gr.update(**(args or {}))
 
-    refresh_button = gr.Button(refresh_symbol, elem_classes=elem_class, interactive=interactive)
+    classes = list(elem_class) if isinstance(elem_class, (list, tuple)) else [elem_class]
+    if 'refresh-icon-btn' not in classes:
+        classes.append('refresh-icon-btn')
+    refresh_button = gr.Button(refresh_symbol, elem_classes=classes, interactive=interactive, visible=visible)
     refresh_button.click(
         fn=lambda: {k: tuple(v) if type(k) is list else v for k, v in refresh().items()},
         inputs=[],
