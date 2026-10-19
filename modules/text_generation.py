@@ -22,8 +22,9 @@ def generate_reply(*args, **kwargs):
     state = args[1] if len(args) > 1 else kwargs.get('state', {})
     use_parallel = (
         state.get('stop_event') is not None
-        and shared.model.__class__.__name__ in ['Exllamav3Model', 'LlamaServer', 'TensorRTLLMModel']
+        and shared.model.__class__.__name__ in ['Exllamav3Model', 'LlamaServer', 'TensorRTLLMModel', 'vLLMServer']
         and (shared.model.__class__.__name__ != 'LlamaServer' or shared.args.parallel > 1)
+        and (shared.model.__class__.__name__ != 'vLLMServer' or shared.args.max_num_seqs > 1)
     )
 
     if not use_parallel:

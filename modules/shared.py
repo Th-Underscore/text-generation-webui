@@ -141,6 +141,26 @@ group.add_argument('--enable-tp', '--enable_tp', action='store_true', help='Enab
 group.add_argument('--tp-backend', type=str, default='native', help='The backend for tensor parallelism. Valid options: native, nccl. Default: native.')
 group.add_argument('--cfg-cache', action='store_true', help='Create an additional cache for CFG negative prompts. Necessary to use CFG with that loader.')
 
+# vLLM
+group = parser.add_argument_group('vLLM')
+group.add_argument('--tensor-parallel-size', type=int, default=1, metavar='N', help='Number of GPUs to shard the model across with tensor parallelism.')
+group.add_argument('--gpu-memory-utilization', type=float, default=0.90, metavar='N', help='Fraction of GPU memory vLLM may use (0-1).')
+group.add_argument('--max-num-seqs', type=int, default=4, metavar='N', help='Maximum number of sequences processed concurrently in a single iteration.')
+group.add_argument('--max-num-batched-tokens', type=int, default=2048, metavar='N', help='Maximum number of tokens processed per scheduler iteration.')
+group.add_argument('--gpu-devices', type=str, default=None, help='Comma-separated list of GPU indices vLLM may use. Example: 0,1.')
+group.add_argument('--enforce-eager', action='store_true', help='Disable CUDA graphs and always run in eager mode. Saves VRAM at a performance cost.')
+group.add_argument('--attention-backend', type=str, default='auto', help='Attention backend to use. "auto" lets vLLM choose.')
+group.add_argument('--language-model-only', action='store_true', help='Load only the language model and skip multimodal components.')
+group.add_argument('--kv-cache-dtype', type=str, default='auto', help='Data type for the KV cache. "auto" uses the model dtype. Example: fp8.')
+group.add_argument('--block-size', type=int, default=16, metavar='N', help='Token block size for the paged KV cache.')
+group.add_argument('--cpu-offload-gb', type=float, default=0, metavar='N', help='GiB of CPU RAM per GPU to use as extra memory for offloading model weights.')
+group.add_argument('--enable-prefix-caching', action=argparse.BooleanOptionalAction, default=True, help='Reuse KV cache blocks across requests that share a prompt prefix.')
+group.add_argument('--optimization-level', type=int, default=2, choices=[0, 1, 2, 3], help='vLLM compilation/optimization level. Higher levels trade startup time for throughput.')
+group.add_argument('--limit-mm-per-prompt', type=str, default='{"image":0,"video":0}', help='JSON object limiting multimodal items per prompt. Example: \'{"image":4,"video":0}\'.')
+group.add_argument('--compilation-config', type=str, default='', help='JSON compilation config passed to vLLM. Leave empty for the default.')
+group.add_argument('--speculative_config', type=str, default='', help='Speculative decoder passed to vLLM.')
+group.add_argument('--mamba-cache-mode', type=str, default='none', choices=['none', 'align', 'all'], help='Mamba/linear-attention cache mode. Required for hybrid models (e.g. Qwen3.8). Set to "none" for pure-attention models.')
+
 # Gradio
 group = parser.add_argument_group('Gradio')
 group.add_argument('--listen', action='store_true', help='Make the web UI reachable from your local network.')
@@ -444,6 +464,8 @@ def fix_loader_name(name):
         return 'ExLlamav3'
     elif name in ['tensorrt', 'tensorrtllm', 'tensorrt_llm', 'tensorrt-llm', 'tensort', 'tensortllm']:
         return 'TensorRT-LLM'
+    elif name in ['1cat-vllm', '1cat_vllm', '1catvllm']:
+        return '1Cat-vLLM'
 
 
 def is_chat():

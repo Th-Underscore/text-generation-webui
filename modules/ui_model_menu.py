@@ -120,7 +120,7 @@ def create_ui():
                             shared.gradio['attention_backend'] = gr.Dropdown(
                                 label="attention_backend",
                                 value=getattr(shared.args, 'attention_backend', 'auto'),
-                                choices=['auto', 'FLASH_ATTN', 'FLASHINFER', 'TORCH_SDPA', 'TRITON_ATTN', 'XFORMERS', 'FLEX_ATTENTION', 'TREE_ATTN'],
+                                choices=['auto', 'FLASH_ATTN', 'FLASHINFER', 'TORCH_SDPA', 'triton_attn', 'XFORMERS', 'FLEX_ATTENTION', 'TREE_ATTN'],
                                 info='Attention backend to use (auto = best available).'
                             )
                             shared.gradio['enforce_eager'] = gr.Checkbox(
@@ -133,6 +133,52 @@ def create_ui():
                                 value=getattr(shared.args, 'quantization', 'None'),
                                 choices=['None', 'awq', 'gptq', 'fp8', 'marlin', 'qqq', 'experts_int8'],
                                 info='Quantization type for the model (e.g., awq for AWQ models).'
+                            )
+                            shared.gradio['language_model_only'] = gr.Checkbox(
+                                label="language_model_only", value=getattr(shared.args, 'language_model_only', False),
+                                info='Disable all multimodal (vision/video) processing. Frees VRAM for text-only generation.'
+                            )
+                            shared.gradio['kv_cache_dtype'] = gr.Dropdown(
+                                label="kv_cache_dtype",
+                                value=getattr(shared.args, 'kv_cache_dtype', 'auto'),
+                                choices=['auto', 'float16', 'bfloat16', 'fp8', 'fp8_e4m3', 'fp8_e5m2', 'turboquant_k8v4', 'turboquant_4bit_nc', 'turboquant_k3v4_nc', 'turboquant_3bit_nc'],
+                                info='KV cache data type. fp8/turboquant variants reduce KV memory usage, enabling longer contexts.'
+                            )
+                            shared.gradio['block_size'] = gr.Slider(
+                                label="block_size", minimum=8, step=8, maximum=256, value=getattr(shared.args, 'block_size', 16),
+                                info='KV cache block size. Larger values reduce bookkeeping overhead for long contexts.'
+                            )
+                            shared.gradio['cpu_offload_gb'] = gr.Slider(
+                                label="cpu_offload_gb", minimum=0, step=1, maximum=32, value=getattr(shared.args, 'cpu_offload_gb', 0),
+                                info='GB of model weights to offload to CPU RAM (UVA zero-copy). Last resort for tight VRAM fits.'
+                            )
+                            shared.gradio['enable_prefix_caching'] = gr.Checkbox(
+                                label="enable_prefix_caching", value=getattr(shared.args, 'enable_prefix_caching', True),
+                                info='Cache common prompt prefixes. Valuable for multi-turn conversations with repeated system prompts.'
+                            )
+                            shared.gradio['optimization_level'] = gr.Dropdown(
+                                label="optimization_level",
+                                value=getattr(shared.args, 'optimization_level', 2),
+                                choices=[0, 1, 2, 3],
+                                info='O0=no compilation (fastest startup), O1=dynamo+inductor, O2=full cudagraphs (default), O3=stochastic.'
+                            )
+                            shared.gradio['limit_mm_per_prompt'] = gr.Textbox(
+                                label="limit_mm_per_prompt", value=getattr(shared.args, 'limit_mm_per_prompt', "{'image': 0, 'video': 0}"),
+                                info='JSON dict limiting multimodal items per prompt. E.g. {\'image\':0,\'video\':0} to disable vision.'
+                            )
+                            shared.gradio['compilation_config'] = gr.Textbox(
+                                label="compilation_config", value=getattr(shared.args, 'compilation_config', ""),
+                                info='JSON compilation config override. E.g. {\'mode\':\'none\',\'cudagraph_mode\':\'full_and_piecewise\',\'cudagraph_capture_sizes\':[1]}. Leave empty for auto.'
+                            )
+                            shared.gradio['speculative_config'] = gr.Textbox(
+                                label="speculative_config", value=getattr(shared.args, 'speculative_config', ""),
+                                info='JSON speculative decoding config. E.g. {\'method\':\'dflash\',\'model\':\'/path/to/DFlash2\',\'kv_cache_dtype\':\'auto\'}. Leave empty to disable.'
+                            )
+                            shared.gradio['mamba_cache_mode'] = gr.Dropdown(
+                                label="mamba_cache_mode",
+                                value=getattr(shared.args, 'mamba_cache_mode', 'none'),
+                                choices=['none', 'align', 'all'],
+                                info='Mamba/linear-attention cache mode. Required for hybrid models (e.g. Qwen3.8). Set to "none" for pure-attention models.'
                             )
 
                             # Multimodal
